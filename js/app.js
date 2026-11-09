@@ -1,0 +1,532 @@
+/*
+ * 生產出貨庫存效期管理｜畫面與 FEFO 庫存引擎
+ * ---------------------------------------------------------------
+ * 資料（FEStore，見 cloud-store.js）：
+ *   products  { id, name, unit, shelfDays, lowStock }                       id = 'p-' + 名稱雜湊（兩台裝置新增同名產品會合併成同一筆）
+ *   settings  { id: 'main', warnDays, defaultShelf }
+ *   opening   { id, type: 'opening', seq, product, batch, manufactureDate, expiryDate, entryDate, quantity, note, by, at, editBy?, editAt? }
+ *   moves     生產 { id, type: 'production', seq, date, product, batch, manufactureDate, expiryDate, quantity, note, by, at, ... }
+ *             出貨 { id, type: 'shipment', seq, date, product, quantity, orderNo, note, by, at, ... }
+ *   product 欄位存「產品名稱」（不是 id），和舊的網頁版、離線版 JSON 備份格式相同。
+ * 分頁（網址 #）：dashboard opening production shipment batches allocations products manage users
+ * 權限：FEAuth.can(代號)，管理員全部都有。代號見 PERMS。這是畫面權限，雲端後端只擋「不在名單的人」。
+ */
+'use strict';
+
+const PERMS = [
+  { id: 'produce', label: '生產與期初庫存', desc: '新增、修改、刪除期初庫存與每日生產紀錄' },
+  { id: 'ship', label: '出貨', desc: '新增、修改、刪除每日出貨紀錄' },
+  { id: 'setting', label: '產品與效期設定', desc: '修改產品單位、保存天數、低庫存警戒量，以及效期預警天數' },
+];
+const PERM_LABEL = Object.fromEntries(PERMS.map(p => [p.id, p.label]));
+const isAdmin = () => !!(window.FEAuth && FEAuth.isAdmin());
+const can = p => !!(window.FEAuth && FEAuth.can(p));
+const myName = () => (window.FEAuth && FEAuth.name()) || '';
+const MAX_ROWS = 300;
+
+/* ---------- 基本工具 ---------- */
+const TODAY = () => { const n = new Date(); return `${n.getFullYear()}-${String(n.getMonth() + 1).padStart(2, '0')}-${String(n.getDate()).padStart(2, '0')}`; };
+const esc = v => String(v ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+const fmt = n => Number(n || 0).toLocaleString('zh-TW', { maximumFractionDigits: 3 });
+const isDate = s => { if (typeof s !== 'string' || !/^\d{4}-\d{2}-\d{2}$/.test(s)) return false; const [y, m, d] = s.split('-').map(Number); const z = new Date(Date.UTC(y, m - 1, d)); return z.getUTCFullYear() === y && z.getUTCMonth() === m - 1 && z.getUTCDate() === d; };
+const addDays = (date, days) => { if (!isDate(date) || !Number.isFinite(Number(days))) return ''; const [y, m, d] = date.split('-').map(Number); return new Date(Date.UTC(y, m - 1, d + Number(days))).toISOString().slice(0, 10); };
+const dayDiff = (from, to) => { const p = s => { const [y, m, d] = s.split('-').map(Number); return Date.UTC(y, m - 1, d); }; return Math.round((p(to) - p(from)) / 86400000); };
+const shortDate = s => isDate(s) ? s.slice(5).replace('-', '/') : '—';
+const $ = id => document.getElementById(id);
+const clean = s => String(s ?? '').trim();
+const clampQty = q => Math.round((Number(q) + Number.EPSILON) * 1000) / 1000;
+const cmp = (a, b) => a < b ? -1 : a > b ? 1 : 0;
+const uid = () => `id_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 9)}`;
+const cyrb53 = (str, seed = 0) => { let h1 = 0xdeadbeef ^ seed, h2 = 0x41c6ce57 ^ seed; for (let i = 0, ch; i < str.length; i++) { ch = str.charCodeAt(i); h1 = Math.imul(h1 ^ ch, 2654435761); h2 = Math.imul(h2 ^ ch, 1597334677); } h1 = Math.imul(h1 ^ (h1 >>> 16), 2246822507); h1 ^= Math.imul(h2 ^ (h2 >>> 13), 3266489909); h2 = Math.imul(h2 ^ (h2 >>> 16), 2246822507); h2 ^= Math.imul(h1 ^ (h1 >>> 13), 3266489909); return 4294967296 * (2097151 & h2) + (h1 >>> 0); };
+const productId = name => 'p-' + cyrb53(clean(name)).toString(36);
+let lastSeq = 0; const nextSeq = () => { const n = Math.max(Date.now(), lastSeq + 1); lastSeq = n; return n; };
+const nowIso = () => new Date().toISOString();
+const blankState = () => ({ version: 1, products: [], opening: [], movements: [], settings: { warnDays: 30, defaultShelf: 30 } });
+
+/* ---------- 狀態 ---------- */
+let data = blankState();
+let currentView = 'dashboard';
+let editOpening = null, editProduction = null, editShipment = null;
+const loading = () => !FEStore.status().loaded;
+
+const getProduct = name => data.products.find(p => p.name === clean(name));
+const getUnit = (name, st = data) => st.products.find(p => p.name === name)?.unit || '個';
+const unitsLabel = entries => { const units = [...new Set(entries.map(x => x.unit))]; if (!entries.length) return '0'; if (units.length === 1) return `${fmt(entries.reduce((t, x) => t + x.quantity, 0))}<span class="kpi-unit">${esc(units[0])}</span>`; return `${entries.length}<span class="kpi-unit">筆（多種單位）</span>`; };
+
+function toast(message, error = false, ms = 4200) { const el = $('toast'); el.textContent = message; el.className = `toast${error ? ' error' : ''}`; el.hidden = false; clearTimeout(toast._t); toast._t = setTimeout(() => { el.hidden = true; }, ms); }
+
+/* ---------- 從 FEStore 組出畫面用的資料（共用資料一律先檢查格式） ---------- */
+function normProduct(p) {
+  if (!p || !clean(p.name)) return null;
+  const sd = Number(p.shelfDays), low = Number(p.lowStock);
+  return { id: clean(p.id) || productId(p.name), name: clean(p.name), unit: clean(p.unit) || '個', shelfDays: Number.isInteger(sd) && sd >= 0 ? sd : 30, lowStock: low > 0 ? low : 0 };
+}
+function normSettings(s) {
+  const w = Number(s?.warnDays), d = Number(s?.defaultShelf);
+  return { warnDays: Number.isInteger(w) && w > 0 ? w : 30, defaultShelf: Number.isInteger(d) && d >= 0 ? d : 30 };
+}
+function sanitizeRec(r) {
+  if (!r || typeof r !== 'object' || !r.id) return null;
+  const q = Number(r.quantity), product = clean(r.product);
+  if (!product || !(q > 0) || !Number.isFinite(q)) return null;
+  const base = { id: String(r.id), seq: Number(r.seq) || 0, product, quantity: q, note: clean(r.note), by: clean(r.by), at: r.at || '', editBy: clean(r.editBy), editAt: r.editAt || '' };
+  if (r.type === 'shipment') return isDate(r.date) ? { ...base, type: 'shipment', date: r.date, orderNo: clean(r.orderNo) } : null;
+  if (!isDate(r.manufactureDate) || !isDate(r.expiryDate)) return null;
+  const lot = { ...base, batch: clean(r.batch) || '—', manufactureDate: r.manufactureDate, expiryDate: r.expiryDate };
+  if (r.type === 'opening') return isDate(r.entryDate) ? { ...lot, type: 'opening', entryDate: r.entryDate } : null;
+  if (r.type === 'production') return isDate(r.date) ? { ...lot, type: 'production', date: r.date } : null;
+  return null;
+}
+function addVirtualProducts(st) {
+  const names = new Set(st.products.map(p => p.name));
+  for (const r of [...st.opening, ...st.movements]) if (!names.has(r.product)) { names.add(r.product); st.products.push({ id: productId(r.product), name: r.product, unit: '個', shelfDays: st.settings.defaultShelf, lowStock: 0, virtual: true }); }
+  return st;
+}
+function rebuild() {
+  const seen = new Set();
+  const products = FEStore.list('products').map(normProduct).filter(p => p && !seen.has(p.name) && seen.add(p.name));
+  const settings = normSettings(FEStore.get('settings', 'main'));
+  const opening = [], movements = [];
+  for (const r of FEStore.list('opening')) { const x = sanitizeRec({ ...r, type: 'opening' }); if (x) opening.push(x); }
+  for (const r of FEStore.list('moves')) { const x = sanitizeRec(r); if (x && x.type !== 'opening') movements.push(x); }
+  data = addVirtualProducts({ version: 1, products, opening, movements, settings });
+}
+
+/* ---------- 寫入（先存這台裝置，背景上傳雲端） ---------- */
+const kindOfRec = r => r.type === 'opening' ? 'opening' : 'moves';
+function storeRecord(rec) {
+  const b = { id: rec.id, type: rec.type, seq: rec.seq, product: rec.product, quantity: rec.quantity, note: rec.note || '', by: rec.by || '', at: rec.at || '' };
+  if (rec.editBy) { b.editBy = rec.editBy; b.editAt = rec.editAt; }
+  if (rec.type === 'shipment') { b.date = rec.date; b.orderNo = rec.orderNo || ''; }
+  else { b.batch = rec.batch; b.manufactureDate = rec.manufactureDate; b.expiryDate = rec.expiryDate; if (rec.type === 'opening') b.entryDate = rec.entryDate; else b.date = rec.date; }
+  FEStore.save(kindOfRec(rec), b);
+}
+const storeProduct = p => FEStore.save('products', { id: p.id, name: p.name, unit: p.unit, shelfDays: p.shelfDays, lowStock: p.lowStock });
+function replaceAll(st) {
+  const strip = r => { const { virtual, ...x } = r; return x; };
+  const uniq = (arr, key) => { const seen = new Set(); return arr.filter(x => !seen.has(key(x)) && seen.add(key(x))); };
+  FEStore.replaceKinds({
+    products: uniq(st.products, p => p.name).map(p => ({ id: productId(p.name), name: p.name, unit: p.unit, shelfDays: p.shelfDays, lowStock: p.lowStock })),
+    settings: [{ id: 'main', warnDays: st.settings.warnDays, defaultShelf: st.settings.defaultShelf }],
+    opening: uniq(st.opening, r => r.id).map(r => strip({ ...r, type: 'opening' })),
+    moves: uniq(st.movements, r => r.id).map(strip),
+  });
+}
+function act(fn) { try { fn(); return true; } catch (err) { toast(err.message || '操作失敗', true, 6000); return false; } }
+
+/* ---------- JSON 備份（與舊的網頁版、離線版通用：version 1） ---------- */
+function isValidState(d) { return !!d && d.version === 1 && Array.isArray(d.products) && Array.isArray(d.opening) && Array.isArray(d.movements) && d.opening.length < 100000 && d.movements.length < 300000; }
+function normalizeImport(d) {
+  return {
+    version: 1,
+    products: d.products.map(normProduct).filter(Boolean),
+    opening: d.opening.map(r => sanitizeRec({ ...r, type: 'opening', entryDate: r.entryDate || r.date })).filter(Boolean),
+    movements: d.movements.map(r => sanitizeRec(r)).filter(r => r && r.type !== 'opening'),
+    settings: normSettings(d.settings),
+  };
+}
+function validateImport(obj) {
+  if (!isValidState(obj)) throw Error('這不是本系統的 JSON 備份檔');
+  for (const row of [...obj.opening, ...obj.movements]) {
+    if (!row || !row.id || !row.product || !(Number(row.quantity) > 0) || !Number.isFinite(Number(row.quantity)) || !(Number(row.quantity) <= 1e12)) throw Error('備份內有無效的數量或產品');
+    if (row.type === 'shipment') { if (!isDate(row.date)) throw Error('出貨日期格式錯誤'); }
+    else if (!isDate(row.expiryDate) || !isDate(row.manufactureDate) || !isDate(row.entryDate || row.date)) throw Error('庫存日期格式錯誤');
+  }
+  for (const p of obj.products) if (!p.name || !p.unit) throw Error('產品資料不完整');
+  return normalizeImport(obj);
+}
+function exportState() {
+  const maxSeq = [...data.opening, ...data.movements].reduce((m, x) => Math.max(m, Number(x.seq) || 0), 0);
+  return { version: 1, products: data.products.map(({ virtual, ...p }) => p), opening: data.opening.map(({ type, ...r }) => r), movements: data.movements.map(r => ({ ...r })), settings: { ...data.settings }, nextSeq: maxSeq + 1 };
+}
+
+/* ---------- 庫存引擎：依日期重放所有事件；同日先入庫，再依出貨順序扣最早到期者 ---------- */
+function calculateLedger(asOf = '9999-12-31', st = data) {
+  const events = [];
+  for (const x of st.opening) if (x.entryDate <= asOf) events.push({ date: x.entryDate, priority: 0, seq: x.seq || 0, type: 'opening', item: x });
+  for (const x of st.movements) if (x.date <= asOf) events.push({ date: x.date, priority: x.type === 'production' ? 0 : 1, seq: x.seq || 0, type: x.type, item: x });
+  events.sort((a, b) => cmp(a.date, b.date) || a.priority - b.priority || a.seq - b.seq || cmp(String(a.item.id), String(b.item.id)));
+  const lots = [], shipments = new Map(), byProduct = new Map();
+  for (const e of events) {
+    const x = e.item;
+    if (e.type === 'opening' || e.type === 'production') {
+      const lot = { id: x.id, source: e.type, product: x.product, batch: x.batch, manufactureDate: x.manufactureDate, expiryDate: x.expiryDate, entryDate: e.date, quantity: Number(x.quantity), used: 0, remaining: Number(x.quantity), seq: x.seq || 0, unit: getUnit(x.product, st) };
+      lots.push(lot);
+      if (!byProduct.has(lot.product)) byProduct.set(lot.product, []);
+      byProduct.get(lot.product).push(lot);
+      continue;
+    }
+    const eligible = (byProduct.get(x.product) || []).filter(l => l.remaining > 1e-7 && l.expiryDate >= e.date && l.manufactureDate <= e.date && l.entryDate <= e.date);
+    eligible.sort((a, b) => cmp(a.expiryDate, b.expiryDate) || cmp(a.manufactureDate, b.manufactureDate) || cmp(a.entryDate, b.entryDate) || a.seq - b.seq || cmp(a.id, b.id));
+    const required = Number(x.quantity); let remaining = required; const allocations = [];
+    for (const lot of eligible) { if (remaining <= 1e-7) break; const amount = clampQty(Math.min(remaining, lot.remaining)); lot.remaining = clampQty(lot.remaining - amount); lot.used = clampQty(lot.used + amount); remaining = clampQty(remaining - amount); allocations.push({ lotId: lot.id, product: lot.product, batch: lot.batch, manufactureDate: lot.manufactureDate, expiryDate: lot.expiryDate, quantity: amount }); }
+    shipments.set(x.id, { required, shipped: clampQty(required - remaining), shortage: clampQty(remaining), allocations });
+  }
+  return { lots, shipments };
+}
+function groupLots(ledger) { const g = new Map(); for (const lot of ledger.lots) { const key = JSON.stringify([lot.product, lot.batch, lot.manufactureDate, lot.expiryDate]); if (!g.has(key)) g.set(key, { product: lot.product, batch: lot.batch, manufactureDate: lot.manufactureDate, expiryDate: lot.expiryDate, opening: 0, production: 0, used: 0, remaining: 0, unit: lot.unit }); const r = g.get(key); r[lot.source] = clampQty(r[lot.source] + lot.quantity); r.used = clampQty(r.used + lot.used); r.remaining = clampQty(r.remaining + lot.remaining); } return [...g.values()].sort((a, b) => cmp(a.expiryDate, b.expiryDate) || cmp(a.product, b.product) || cmp(a.manufactureDate, b.manufactureDate)); }
+function productSummary(ledger, asOf = TODAY()) {
+  const by = new Map(); for (const l of ledger.lots) { if (!by.has(l.product)) by.set(l.product, []); by.get(l.product).push(l); }
+  return data.products.map(p => { const lots = by.get(p.name) || []; const usable = clampQty(lots.filter(x => x.expiryDate >= asOf).reduce((s, x) => s + x.remaining, 0)); const expired = clampQty(lots.filter(x => x.expiryDate < asOf).reduce((s, x) => s + x.remaining, 0)); const warning = clampQty(lots.filter(x => x.expiryDate >= asOf && dayDiff(asOf, x.expiryDate) <= data.settings.warnDays).reduce((s, x) => s + x.remaining, 0)); const oldest = lots.filter(x => x.remaining > 0 && x.expiryDate >= asOf).sort((a, b) => cmp(a.expiryDate, b.expiryDate))[0]?.expiryDate || ''; const produced = clampQty(lots.filter(x => x.source === 'production').reduce((s, x) => s + x.quantity, 0)); const opened = clampQty(lots.filter(x => x.source === 'opening').reduce((s, x) => s + x.quantity, 0)); const used = clampQty(lots.reduce((s, x) => s + x.used, 0)); return { ...p, usable, expired, warning, oldest, produced, opened, used }; }).sort((a, b) => cmp(a.name, b.name));
+}
+function expiryStatus(expiry, qty, date = TODAY()) { if (qty <= 0) return { label: '已用完', cls: 'other' }; const days = dayDiff(date, expiry); if (days < 0) return { label: '已過期', cls: 'expired' }; if (days <= 7) return { label: days === 0 ? '今日到期' : `剩 ${days} 天`, cls: 'critical' }; if (days <= data.settings.warnDays) return { label: `剩 ${days} 天`, cls: 'due' }; return { label: '正常', cls: 'ok' }; }
+
+/* ---------- 表格與畫面 ---------- */
+const badge = (label, cls) => `<span class="pill ${cls}">${esc(label)}</span>`;
+const td = v => `<td>${v}</td>`;
+const tdm = v => `<td class="mono">${esc(v || '—')}</td>`;
+const tdWho = r => `<td class="who" title="${esc(r.editBy ? `最後修改：${r.editBy}` : '')}">${esc(r.by || '—')}${r.editBy && r.editBy !== r.by ? '＊' : ''}</td>`;
+function table(columns, rows, empty = '尚無資料') {
+  if (!rows.length) return `<div class="empty">${esc(loading() ? '正在讀取資料…' : empty)}</div>`;
+  const more = rows.length > MAX_ROWS ? `<div class="more">共 ${rows.length} 筆，只顯示前 ${MAX_ROWS} 筆；請用搜尋縮小範圍，或匯出 CSV／Excel 查看全部。</div>` : '';
+  return `<table class="data-table"><thead><tr>${columns.map(c => c.endsWith('#') ? `<th class="num">${esc(c.slice(0, -1))}</th>` : `<th>${esc(c)}</th>`).join('')}</tr></thead><tbody>${rows.slice(0, MAX_ROWS).join('')}</tbody></table>${more}`;
+}
+function searchable(rows, term, fields) { const q = clean(term).toLowerCase(); return !q ? rows : rows.filter(r => fields.some(k => String(r[k] ?? '').toLowerCase().includes(q))); }
+const permFor = type => type === 'shipment' ? 'ship' : 'produce';
+const manageCol = type => can(permFor(type)) ? ['管理'] : [];
+const manageCell = (kind, id) => can(permFor(kind)) ? td(`<div class="segment"><button type="button" class="btn small" data-action="edit-${kind}" data-id="${esc(id)}">修改</button><button type="button" class="btn small danger" data-action="delete-${kind}" data-id="${esc(id)}">刪除</button></div>`) : '';
+
+const VIEWS = { dashboard: ['營運總覽', '每日生產、出貨及批次有效日期，即時統整。'], opening: ['期初庫存建檔', '原始庫存按製作日期分開管理，不需擔心同批不同效期。'], production: ['每日生產登錄', '每筆生產都會自動增加可出貨批次庫存。'], shipment: ['每日出貨登錄', '自動從有效期最近的庫存開始扣除。'], batches: ['批次庫存與效期', '依製作日期和有效日期追蹤每一批剩餘量。'], allocations: ['出貨扣批明細', '每張出貨單實際扣除了哪些製作日期，一目了然。'], products: ['產品庫存總表', '總庫存、近效期及過期量依產品清楚呈現。'], manage: ['資料與設定', '備份、效期預警及產品基本設定。'], users: ['人員與權限', '管理誰可以登入，以及每個人能做的事。'] };
+function showView(view) {
+  if (!VIEWS[view] || (view === 'users' && !isAdmin())) { view = 'dashboard'; if (location.hash && location.hash !== '#dashboard') try { history.replaceState(null, '', '#dashboard'); } catch (e) {} }
+  const changed = currentView !== view; currentView = view;
+  document.querySelectorAll('.section').forEach(e => e.classList.toggle('active', e.id === view));
+  document.querySelectorAll('.nav-btn').forEach(b => b.classList.toggle('active', b.dataset.view === view));
+  $('pageTitle').textContent = VIEWS[view][0]; $('pageSub').textContent = VIEWS[view][1];
+  if (view === 'shipment') previewForShipment();
+  if (view === 'users') loadUsers();
+  if (changed) try { window.scrollTo({ top: 0 }); } catch (e) {}
+}
+function go(view) { if (location.hash.slice(1) !== view) location.hash = view; else showView(view); }
+
+let renderQueued = false;
+function scheduleRender() { if (renderQueued) return; renderQueued = true; setTimeout(() => { renderQueued = false; render(); }, 0); }
+function render() {
+  const today = TODAY(), current = calculateLedger(today), full = calculateLedger(), groups = groupLots(current), prod = productSummary(current, today);
+  renderDashboard(today, current, groups, prod); renderOpening(); renderProduction(); renderShipments(full); renderBatches(groups, today); renderAllocations(full); renderProducts(prod); renderSettings();
+  $('productNames').innerHTML = data.products.map(p => `<option value="${esc(p.name)}"></option>`).join('');
+  const empty = !data.opening.length && !data.movements.length;
+  $('welcome').hidden = loading() || !empty || !(isAdmin() || can('produce'));
+  $('recordInfo').textContent = loading() ? '讀取中…' : `共 ${data.opening.length + data.movements.length} 筆紀錄｜${data.products.length} 項產品`;
+  if (currentView === 'shipment') previewForShipment();
+}
+function renderDashboard(today, current, groups, prod) {
+  const todayProductions = data.movements.filter(x => x.type === 'production' && x.date === today).map(x => ({ quantity: x.quantity, unit: getUnit(x.product) }));
+  const todayShip = data.movements.filter(x => x.type === 'shipment' && x.date === today).map(x => ({ quantity: current.shipments.get(x.id)?.shipped || 0, unit: getUnit(x.product) }));
+  const usableProducts = prod.filter(x => x.usable > 0).length;
+  const live = groups.filter(x => x.remaining > 0);
+  const due = live.filter(x => { const d = dayDiff(today, x.expiryDate); return d >= 0 && d <= data.settings.warnDays; }).length;
+  const due7 = live.filter(x => { const d = dayDiff(today, x.expiryDate); return d >= 0 && d <= 7; }).length;
+  const expired = live.filter(x => x.expiryDate < today).length;
+  $('summaryCards').innerHTML = `<article class="kpi"><div class="kpi-label">今日生產量</div><div class="kpi-value">${unitsLabel(todayProductions)}</div><div class="kpi-desc">已登錄 ${todayProductions.length} 筆生產</div></article><article class="kpi"><div class="kpi-label">今日實際出貨量</div><div class="kpi-value">${unitsLabel(todayShip)}</div><div class="kpi-desc">已登錄 ${todayShip.length} 筆出貨需求</div></article><article class="kpi"><div class="kpi-label">目前有庫存產品</div><div class="kpi-value">${usableProducts}<span class="kpi-unit">種</span></div><div class="kpi-desc">所有庫存以產品個別單位計算</div></article><article class="kpi ${expired ? 'bad' : due ? 'warn' : ''}"><div class="kpi-label">效期預警批次</div><div class="kpi-value">${due}<span class="kpi-unit">批</span></div><div class="kpi-desc">7 天內 ${due7} 批｜已過期 ${expired} 批</div></article>`;
+  const shortCount = [...current.shipments.values()].filter(x => x.shortage > 0).length;
+  const alert = $('shortageAlert'); alert.hidden = shortCount === 0; if (shortCount) alert.innerHTML = `目前有 <strong>${shortCount}</strong> 筆出貨未能足額分配。出貨缺口不列入實際出貨、不產生負庫存，請前往「每日出貨登錄」檢視。`;
+  const chartDays = Array.from({ length: 7 }, (_, i) => addDays(today, i - 6));
+  const trend = chartDays.map(d => ({ date: d, prod: data.movements.filter(m => m.type === 'production' && m.date === d).reduce((s, m) => s + m.quantity, 0), ship: data.movements.filter(m => m.type === 'shipment' && m.date === d).reduce((s, m) => s + (current.shipments.get(m.id)?.shipped || 0), 0) }));
+  const max = Math.max(0, ...trend.flatMap(x => [x.prod, x.ship])); const h = v => v > 0 && max > 0 ? Math.max(2, Math.round(v / max * 100)) : 0;
+  $('trendChart').innerHTML = trend.map(x => `<div class="chart-day${x.date === today ? ' today' : ''}" title="${x.date}：生產 ${fmt(x.prod)}，出貨 ${fmt(x.ship)}"><div class="chart-bars"><div class="bar produced" style="height:${h(x.prod)}%"></div><div class="bar shipped" style="height:${h(x.ship)}%"></div></div><span>${x.date === today ? '今天' : shortDate(x.date)}</span></div>`).join('');
+  $('chartScale').textContent = max > 0 ? `最高柱 = ${fmt(max)}（混合單位時僅供趨勢參考）` : '近 7 天尚無生產或出貨';
+  const warns = live.filter(x => x.expiryDate < today || dayDiff(today, x.expiryDate) <= data.settings.warnDays).sort((a, b) => cmp(a.expiryDate, b.expiryDate)).slice(0, 10);
+  $('dashExpiry').innerHTML = table(['產品', '批號', '製作日期', '有效日期', '剩餘量#', '狀態'], warns.map(x => { const s = expiryStatus(x.expiryDate, x.remaining, today); return `<tr>${td(`<strong>${esc(x.product)}</strong>`)}${tdm(x.batch)}${tdm(x.manufactureDate)}${tdm(x.expiryDate)}<td class="num">${fmt(x.remaining)} ${esc(x.unit)}</td>${td(badge(s.label, s.cls))}</tr>`; }), '目前沒有需要注意的效期庫存');
+  const ships = data.movements.filter(x => x.type === 'shipment' && x.date <= today).sort((a, b) => cmp(b.date, a.date) || b.seq - a.seq).slice(0, 8);
+  $('dashShipments').innerHTML = table(['出貨日', '產品', '出貨單號／客戶', '需求量#', '實際出貨#', '缺口', '登錄人'], ships.map(x => { const s = current.shipments.get(x.id) || { shipped: 0, shortage: x.quantity }; return `<tr>${tdm(x.date)}${td(`<strong>${esc(x.product)}</strong>`)}${td(esc(x.orderNo || '—'))}<td class="num">${fmt(x.quantity)}</td><td class="num">${fmt(s.shipped)}</td>${td(s.shortage ? badge(`缺 ${fmt(s.shortage)}`, 'bad') : badge('足額', 'ok'))}${tdWho(x)}</tr>`; }), '尚無出貨紀錄');
+}
+function renderOpening() {
+  const rows = searchable([...data.opening].sort((a, b) => cmp(b.entryDate, a.entryDate) || b.seq - a.seq), $('openingFilter').value, ['product', 'batch', 'manufactureDate', 'entryDate', 'note', 'by']);
+  $('openingCount').textContent = `共 ${data.opening.length} 筆建檔`;
+  $('openingTable').innerHTML = table(['入帳日期', '產品', '批號', '製作日期', '有效日期', '原始庫存#', '備註', '登錄人', ...manageCol('opening')], rows.map(x => `<tr>${tdm(x.entryDate)}${td(`<strong>${esc(x.product)}</strong>`)}${tdm(x.batch)}${tdm(x.manufactureDate)}${tdm(x.expiryDate)}<td class="num">${fmt(x.quantity)} ${esc(getUnit(x.product))}</td>${td(esc(x.note || '—'))}${tdWho(x)}${manageCell('opening', x.id)}</tr>`), '尚未建立期初庫存' + (can('produce') ? '，請使用上方表單新增' : ''));
+}
+function renderProduction() {
+  const list = data.movements.filter(x => x.type === 'production');
+  const rows = searchable([...list].sort((a, b) => cmp(b.date, a.date) || b.seq - a.seq), $('productionFilter').value, ['date', 'product', 'batch', 'manufactureDate', 'note', 'by']);
+  $('productionCount').textContent = `共 ${list.length} 筆生產`;
+  $('productionTable').innerHTML = table(['入庫日期', '產品', '批號', '製作日期', '有效日期', '本次生產#', '備註', '登錄人', ...manageCol('production')], rows.map(x => `<tr>${tdm(x.date)}${td(`<strong>${esc(x.product)}</strong>`)}${tdm(x.batch)}${tdm(x.manufactureDate)}${tdm(x.expiryDate)}<td class="num">${fmt(x.quantity)} ${esc(getUnit(x.product))}</td>${td(esc(x.note || '—'))}${tdWho(x)}${manageCell('production', x.id)}</tr>`), '尚未登錄生產紀錄');
+}
+function renderShipments(ledger) {
+  const list = data.movements.filter(x => x.type === 'shipment');
+  const rows = searchable([...list].sort((a, b) => cmp(b.date, a.date) || b.seq - a.seq), $('shipmentFilter').value, ['date', 'product', 'orderNo', 'note', 'by']);
+  $('shipmentCount').textContent = `共 ${list.length} 筆出貨`;
+  $('shipmentTable').innerHTML = table(['出貨日期', '產品', '出貨單號／客戶', '需求量#', '實際出貨#', '缺口', '扣貨批數#', '備註', '登錄人', ...manageCol('shipment')], rows.map(x => { const s = ledger.shipments.get(x.id) || { shipped: 0, shortage: x.quantity, allocations: [] }; return `<tr>${tdm(x.date)}${td(`<strong>${esc(x.product)}</strong>`)}${td(esc(x.orderNo || '—'))}<td class="num">${fmt(x.quantity)} ${esc(getUnit(x.product))}</td><td class="num">${fmt(s.shipped)}</td>${td(s.shortage ? badge(`${fmt(s.shortage)} 未配`, 'bad') : badge('足額', 'ok'))}<td class="num">${s.allocations.length}</td>${td(esc(x.note || '—'))}${tdWho(x)}${manageCell('shipment', x.id)}</tr>`; }), '尚未登錄出貨紀錄');
+}
+function renderBatches(groups, today) {
+  const base = $('batchLive').checked ? groups.filter(x => x.remaining > 0) : groups;
+  const rows = searchable(base, $('batchFilter').value, ['product', 'batch', 'manufactureDate', 'expiryDate']);
+  $('batchCount').textContent = `共 ${groups.length} 組產品／批號／製作日／有效日組合，目前有庫存 ${groups.filter(x => x.remaining > 0).length} 組`;
+  $('batchTable').innerHTML = table(['產品', '批號', '製作日期', '有效日期', '期初量#', '新增生產#', '已出貨#', '剩餘庫存#', '效期狀態'], rows.map(x => { const s = expiryStatus(x.expiryDate, x.remaining, today); return `<tr>${td(`<strong>${esc(x.product)}</strong>`)}${tdm(x.batch)}${tdm(x.manufactureDate)}${tdm(x.expiryDate)}<td class="num">${fmt(x.opening)}</td><td class="num">${fmt(x.production)}</td><td class="num">${fmt(x.used)}</td><td class="num">${fmt(x.remaining)} ${esc(x.unit)}</td>${td(badge(s.label, s.cls))}</tr>`; }), '尚無批次庫存紀錄');
+}
+function allocationRows(ledger) { const rows = []; for (const sh of [...data.movements.filter(x => x.type === 'shipment')].sort((a, b) => cmp(b.date, a.date) || b.seq - a.seq)) { const r = ledger.shipments.get(sh.id); if (!r) continue; for (const a of r.allocations) rows.push({ date: sh.date, orderNo: sh.orderNo || '', product: sh.product, batch: a.batch, manufactureDate: a.manufactureDate, expiryDate: a.expiryDate, quantity: a.quantity, unit: getUnit(sh.product), kind: 'allocated' }); if (r.shortage) rows.push({ date: sh.date, orderNo: sh.orderNo || '', product: sh.product, batch: '未分配', manufactureDate: '', expiryDate: '', quantity: r.shortage, unit: getUnit(sh.product), kind: 'shortage' }); } return rows; }
+function renderAllocations(ledger) {
+  const all = allocationRows(ledger); const rows = searchable(all, $('allocationFilter').value, ['date', 'orderNo', 'product', 'batch', 'manufactureDate']);
+  $('allocationCount').textContent = `共 ${all.length} 筆扣批／缺口明細`;
+  $('allocationTable').innerHTML = table(['出貨日', '出貨單號／客戶', '產品', '扣除批號', '製作日期', '有效日期', '數量#', '類別'], rows.map(x => `<tr>${tdm(x.date)}${td(esc(x.orderNo || '—'))}${td(`<strong>${esc(x.product)}</strong>`)}${x.kind === 'shortage' ? td(badge('未分配', 'bad')) : tdm(x.batch)}${tdm(x.manufactureDate)}${tdm(x.expiryDate)}<td class="num">${fmt(x.quantity)} ${esc(x.unit)}</td>${td(x.kind === 'shortage' ? badge('出貨缺口', 'bad') : badge('已分配', 'ok'))}</tr>`), '尚無出貨扣批紀錄');
+}
+function renderProducts(products) {
+  const base = $('productLive').checked ? products.filter(x => x.usable > 0 || x.expired > 0) : products;
+  const rows = searchable(base, $('productFilter').value, ['name']);
+  $('productTable').innerHTML = table(['產品名稱', '單位', '期初入庫#', '累計生產#', '累計扣貨#', '可用庫存#', '已過期量#', '近效期量#', '最近有效日期', '安全庫存狀態'], rows.map(x => { const st = x.lowStock && x.usable < x.lowStock ? badge(`低於 ${fmt(x.lowStock)}`, 'bad') : x.lowStock ? badge('正常', 'ok') : badge('未設定', 'other'); return `<tr>${td(`<strong>${esc(x.name)}</strong>`)}${td(esc(x.unit))}<td class="num">${fmt(x.opened)}</td><td class="num">${fmt(x.produced)}</td><td class="num">${fmt(x.used)}</td><td class="num">${fmt(x.usable)}</td><td class="num">${fmt(x.expired)}</td><td class="num">${fmt(x.warning)}</td>${tdm(x.oldest)}${td(st)}</tr>`; }), '尚無產品，請先建立期初庫存或生產紀錄');
+}
+function renderSettings() {
+  for (const [id, v] of [['warnDays', data.settings.warnDays], ['defaultShelf', data.settings.defaultShelf]]) { const el = $(id); if (document.activeElement !== el) el.value = v; }
+  const rows = searchable(data.products, $('settingFilter').value, ['name']);
+  $('productSettingsTable').innerHTML = table(['產品', '單位', '保存天數#', '低庫存警戒量#', ...(can('setting') ? ['操作'] : [])], rows.map(p => `<tr>${td(`<strong>${esc(p.name)}</strong>`)}${td(esc(p.unit))}<td class="num">${fmt(p.shelfDays)} 天</td><td class="num">${p.lowStock ? fmt(p.lowStock) : '—'}</td>${can('setting') ? td(`<button type="button" class="btn small" data-action="edit-product" data-id="${esc(p.id)}">修改設定</button>`) : ''}</tr>`), '新增期初庫存或生產資料後，產品會自動顯示在這裡');
+}
+
+/* ---------- 同步狀態、權限、提示列 ---------- */
+function renderSync() {
+  const st = FEStore.status(), el = $('sync');
+  const map = { loading: ['busy', '讀取中…'], syncing: ['busy', '同步中…'], pending: ['busy', '等待上傳'], synced: ['ok', '已同步'], offline: ['warn', '離線'], error: ['bad', '連線失敗'] };
+  const [cls, txt] = map[st.state] || ['', st.state];
+  el.className = 'sync ' + cls; el.querySelector('span').textContent = txt;
+  el.title = (st.detail ? st.detail + '。' : '') + (st.lastSync ? '上次同步 ' + new Date(st.lastSync).toLocaleTimeString('zh-TW', { hour: '2-digit', minute: '2-digit' }) + '。' : '') + '按一下立即同步';
+}
+let lastBanner = '';
+function renderBanner() {
+  const st = FEStore.status(), b = [];
+  if (st.state === 'error') b.push(`<div class="banner bad">${esc(st.detail || '無法連線到雲端')}<button class="btn small" type="button" data-action="sync">重試</button></div>`);
+  else if (st.state === 'offline') b.push(`<div class="banner warn">${esc(st.detail || '目前離線')}。修改會先存在這台裝置，恢復網路後自動上傳。</div>`);
+  if (window.FEAuth && FEAuth.user() && !isAdmin() && !PERMS.some(p => can(p.id))) b.push('<div class="banner">你目前只能查看與下載資料。需要登錄生產、出貨或修改設定的話，請找管理員開權限。</div>');
+  const html = b.join('');
+  if (html !== lastBanner) { $('banner').innerHTML = html; lastBanner = html; }
+}
+function applyPerms() {
+  const cl = document.body.classList;
+  cl.toggle('is-admin', isAdmin());
+  for (const p of PERMS) cl.toggle('can-' + p.id, can(p.id));
+  const n = myName(); $('meName').textContent = n; $('meName2').textContent = n;
+  if (currentView === 'users' && !isAdmin()) go('dashboard');
+  renderBanner();
+}
+
+/* ---------- 表單 ---------- */
+function autoExpiry(prefix) { const m = $(`${prefix}Mfg`).value, day = Number($(`${prefix}Shelf`).value); if (isDate(m) && Number.isFinite(day) && day >= 0) $(`${prefix}Expiry`).value = addDays(m, day); }
+function productDefaults(prefix) { const p = getProduct($(`${prefix}Product`).value); if (p && !p.virtual) { $(`${prefix}Unit`).value = p.unit; $(`${prefix}Shelf`).value = p.shelfDays; } else { $(`${prefix}Shelf`).value = data.settings.defaultShelf; } autoExpiry(prefix); }
+function inputPositive(id) { const v = Number($(id).value); if (!Number.isFinite(v) || !(v > 0) || Math.abs(Math.round(v * 1000) - v * 1000) > 1e-7) throw Error('數量必須大於 0，最多 3 位小數'); return v; }
+function baseRow(prefix, dateKey) {
+  const name = clean($(`${prefix}Product`).value), unit = clean($(`${prefix}Unit`).value), batch = clean($(`${prefix}Batch`).value), manufactureDate = $(`${prefix}Mfg`).value, expiryDate = $(`${prefix}Expiry`).value, entryDate = $(dateKey).value;
+  if (!name || !unit || !batch) throw Error('請填寫產品、單位及批號');
+  if (!isDate(manufactureDate) || !isDate(expiryDate) || !isDate(entryDate)) throw Error('請填寫有效的日期');
+  if (manufactureDate > entryDate) throw Error('製作日期不可晚於入庫日期');
+  if (expiryDate < manufactureDate) throw Error('有效日期不可早於製作日期');
+  return { name, unit, batch, manufactureDate, expiryDate, entryDate, quantity: inputPositive(`${prefix}Qty`), note: clean($(`${prefix}Note`).value), shelfDays: Number($(`${prefix}Shelf`).value) };
+}
+function ensureProductSaved(name, unit, shelfDays) {
+  const m = getProduct(name);
+  if (m && !m.virtual) { if (m.unit !== unit) throw Error(`「${name}」的單位已設定為「${m.unit}」，請統一使用相同單位`); return m; }
+  const p = { id: productId(name), name, unit, shelfDays: Number.isInteger(shelfDays) && shelfDays >= 0 ? shelfDays : data.settings.defaultShelf, lowStock: 0 };
+  storeProduct(p); return p;
+}
+const stampNew = () => ({ by: myName(), at: nowIso() });
+const stampEdit = () => ({ editBy: myName(), editAt: nowIso() });
+function saveOpening(e) { e.preventDefault(); if (!can('produce')) return; act(() => {
+  const r = baseRow('o', 'oEntry'); ensureProductSaved(r.name, r.unit, r.shelfDays);
+  const fields = { product: r.name, batch: r.batch, manufactureDate: r.manufactureDate, expiryDate: r.expiryDate, entryDate: r.entryDate, quantity: r.quantity, note: r.note };
+  if (editOpening) { const old = data.opening.find(x => x.id === editOpening); if (!old) throw Error('這筆資料已被刪除，無法儲存修改'); storeRecord({ ...old, ...fields, ...stampEdit() }); }
+  else storeRecord({ id: uid(), type: 'opening', seq: nextSeq(), ...fields, ...stampNew() });
+  resetOpening(); toast('期初庫存已儲存，其他工作表已同步更新');
+}); }
+function saveProduction(e) { e.preventDefault(); if (!can('produce')) return; act(() => {
+  const r = baseRow('p', 'pDate'); ensureProductSaved(r.name, r.unit, r.shelfDays);
+  const fields = { date: r.entryDate, product: r.name, batch: r.batch, manufactureDate: r.manufactureDate, expiryDate: r.expiryDate, quantity: r.quantity, note: r.note };
+  if (editProduction) { const old = data.movements.find(x => x.id === editProduction); if (!old) throw Error('這筆資料已被刪除，無法儲存修改'); storeRecord({ ...old, ...fields, ...stampEdit() }); }
+  else storeRecord({ id: uid(), type: 'production', seq: nextSeq(), ...fields, ...stampNew() });
+  resetProduction(); toast('生產量已儲存，並增加對應製作日期的庫存');
+}); }
+function previewForShipment() {
+  const box = $('shipmentPreview'); const date = $('sDate').value, product = clean($('sProduct').value), q = Number($('sQty').value);
+  if (!isDate(date) || !product || !Number.isFinite(q) || q <= 0) { box.textContent = '選擇產品並輸入數量，即可預覽最早效期庫存與可能的缺口。'; box.className = 'notice'; return; }
+  if (!getProduct(product)) { box.textContent = '此產品尚未建檔，請從清單選擇已建檔的產品（可輸入品號或品名搜尋）。'; box.className = 'notice warning'; return; }
+  const editing = editShipment ? data.movements.find(x => x.id === editShipment) : null;
+  const temp = { ...data, movements: data.movements.filter(x => x.id !== editShipment).concat([{ id: '__preview__', seq: editing ? editing.seq : Date.now(), type: 'shipment', date, product, quantity: q }]) };
+  const p = calculateLedger('9999-12-31', temp).shipments.get('__preview__'); if (!p) return;
+  const unit = getUnit(product); const details = p.allocations.map(a => `${a.batch}（${a.manufactureDate} 製作／效期 ${a.expiryDate}）扣 ${fmt(a.quantity)}`).join('；');
+  box.className = `notice${p.shortage ? ' warning' : ''}`;
+  box.textContent = `預估可實際出貨 ${fmt(p.shipped)} ${unit}，缺口 ${fmt(p.shortage)} ${unit}。${details ? '預估扣批：' + details : '目前沒有可用的批次庫存。'}`;
+}
+function saveShipment(e) { e.preventDefault(); if (!can('ship')) return; act(() => {
+  const date = $('sDate').value, product = clean($('sProduct').value), quantity = inputPositive('sQty'), orderNo = clean($('sOrder').value), note = clean($('sNote').value);
+  if (!isDate(date) || !product) throw Error('請輸入出貨日期與產品');
+  if (!getProduct(product)) throw Error('此產品尚未建檔，請從清單選擇已建檔的產品');
+  let rec;
+  if (editShipment) { const old = data.movements.find(x => x.id === editShipment); if (!old) throw Error('這筆資料已被刪除，無法儲存修改'); rec = { ...old, date, product, quantity, orderNo, note, ...stampEdit() }; }
+  else rec = { id: uid(), type: 'shipment', seq: nextSeq(), date, product, quantity, orderNo, note, ...stampNew() };
+  const result = calculateLedger('9999-12-31', { ...data, movements: data.movements.filter(x => x.id !== rec.id).concat([rec]) }).shipments.get(rec.id);
+  storeRecord(rec); resetShipment();
+  toast(result.shortage ? `已登錄：實際分配 ${fmt(result.shipped)}，缺口 ${fmt(result.shortage)}` : `已登錄出貨 ${fmt(result.shipped)}，FEFO 扣批完成`, !!result.shortage);
+}); }
+function resetOpening() { $('openingForm').reset(); $('oMfg').value = TODAY(); $('oEntry').value = TODAY(); $('oUnit').value = '個'; $('oShelf').value = data.settings.defaultShelf; autoExpiry('o'); editOpening = null; $('openingFormTitle').textContent = '新增期初庫存'; $('oSubmit').textContent = '＋ 儲存期初庫存'; $('oCancel').classList.add('hide'); }
+function resetProduction() { $('productionForm').reset(); $('pDate').value = TODAY(); $('pMfg').value = TODAY(); $('pUnit').value = '個'; $('pShelf').value = data.settings.defaultShelf; autoExpiry('p'); editProduction = null; $('productionFormTitle').textContent = '新增每日生產資料'; $('pSubmit').textContent = '＋ 儲存生產紀錄'; $('pCancel').classList.add('hide'); }
+function resetShipment() { $('shipmentForm').reset(); $('sDate').value = TODAY(); editShipment = null; $('shipmentFormTitle').textContent = '新增每日出貨資料'; $('sSubmit').textContent = '＋ 儲存出貨紀錄'; $('sCancel').classList.add('hide'); previewForShipment(); }
+const resetForms = () => { resetOpening(); resetProduction(); resetShipment(); };
+const smooth = () => window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches ? 'auto' : 'smooth';
+function populateEdit(type, id) {
+  if (type === 'opening') { const x = data.opening.find(x => x.id === id); if (!x) return; editOpening = id; for (const [f, v] of Object.entries({ oProduct: x.product, oUnit: getUnit(x.product), oBatch: x.batch, oQty: x.quantity, oMfg: x.manufactureDate, oEntry: x.entryDate, oExpiry: x.expiryDate, oNote: x.note || '' })) $(f).value = v; $('oShelf').value = getProduct(x.product)?.shelfDays ?? data.settings.defaultShelf; $('openingFormTitle').textContent = '修改期初庫存'; $('oSubmit').textContent = '儲存修改'; $('oCancel').classList.remove('hide'); go('opening'); setTimeout(() => $('openingForm').scrollIntoView({ block: 'center', behavior: smooth() }), 30); return; }
+  if (type === 'production') { const x = data.movements.find(x => x.id === id && x.type === 'production'); if (!x) return; editProduction = id; for (const [f, v] of Object.entries({ pProduct: x.product, pUnit: getUnit(x.product), pBatch: x.batch, pQty: x.quantity, pMfg: x.manufactureDate, pDate: x.date, pExpiry: x.expiryDate, pNote: x.note || '' })) $(f).value = v; $('pShelf').value = getProduct(x.product)?.shelfDays ?? data.settings.defaultShelf; $('productionFormTitle').textContent = '修改生產紀錄'; $('pSubmit').textContent = '儲存修改'; $('pCancel').classList.remove('hide'); go('production'); setTimeout(() => $('productionForm').scrollIntoView({ block: 'center', behavior: smooth() }), 30); return; }
+  const x = data.movements.find(x => x.id === id && x.type === 'shipment'); if (!x) return; editShipment = id; for (const [f, v] of Object.entries({ sDate: x.date, sProduct: x.product, sQty: x.quantity, sOrder: x.orderNo || '', sNote: x.note || '' })) $(f).value = v; $('shipmentFormTitle').textContent = '修改出貨紀錄'; $('sSubmit').textContent = '儲存修改'; $('sCancel').classList.remove('hide'); go('shipment'); previewForShipment(); setTimeout(() => $('shipmentForm').scrollIntoView({ block: 'center', behavior: smooth() }), 30);
+}
+
+/* ---------- 對話框 ---------- */
+function modal({ title, html, ok = '確定', danger = false, collect = null }) {
+  return new Promise(resolve => {
+    const m = $('modal'), form = $('modalForm'), body = $('modalBody'), okBtn = $('modalOk'), cancel = $('modalCancel');
+    $('modalTitle').textContent = title; body.innerHTML = html; okBtn.textContent = ok; okBtn.className = 'btn ' + (danger ? 'danger-solid' : 'primary');
+    const prev = document.activeElement; m.hidden = false;
+    const close = v => { m.hidden = true; form.onsubmit = null; cancel.onclick = null; m.onclick = null; m.onkeydown = null; try { prev && prev.focus && prev.focus(); } catch (e) {} resolve(v); };
+    form.onsubmit = e => { e.preventDefault(); if (!collect) return close(true); try { close(collect(body)); } catch (err) { const er = body.querySelector('.modal-error'); if (er) { er.textContent = err.message; er.hidden = false; } } };
+    cancel.onclick = () => close(false);
+    m.onclick = e => { if (e.target === m) close(false); };
+    m.onkeydown = e => { if (e.key === 'Escape') close(false); };
+    setTimeout(() => (body.querySelector('input:not([readonly])') || okBtn).focus(), 0);
+  });
+}
+function describeRec(r) { const u = getUnit(r.product); if (r.type === 'shipment') return `${r.date}｜出貨 ${r.product} ${fmt(r.quantity)} ${u}${r.orderNo ? '｜' + r.orderNo : ''}`; return `${r.type === 'opening' ? r.entryDate : r.date}｜${r.type === 'opening' ? '期初庫存' : '生產'} ${r.product}｜批號 ${r.batch}｜${fmt(r.quantity)} ${u}`; }
+async function editProduct(id) {
+  const p = data.products.find(x => x.id === id); if (!p || !can('setting')) return;
+  const res = await modal({ title: `修改「${p.name}」設定`, ok: '儲存設定',
+    html: `<div class="field"><label for="mUnit">單位</label><input id="mUnit" maxlength="12" value="${esc(p.unit)}"></div><div class="field"><label for="mShelf">預設保存天數</label><input id="mShelf" type="number" inputmode="numeric" min="0" max="36500" step="1" value="${esc(p.shelfDays)}"></div><div class="field"><label for="mLow">低庫存警戒量</label><input id="mLow" type="number" inputmode="decimal" min="0" step="0.001" value="${esc(p.lowStock)}"><span class="hint">填 0 代表不提醒</span></div><p class="modal-note" style="margin-top:12px">調整保存天數只影響之後新增的資料，已登錄的有效日期不會更動。</p><p class="modal-error" hidden></p>`,
+    collect: b => { const unit = clean(b.querySelector('#mUnit').value), days = Number(b.querySelector('#mShelf').value), low = Number(b.querySelector('#mLow').value); if (!unit) throw Error('請填寫單位'); if (!Number.isInteger(days) || days < 0 || days > 36500) throw Error('保存天數需為 0 到 36500 的整數'); if (!Number.isFinite(low) || low < 0) throw Error('警戒量不可小於 0'); return { unit, shelfDays: days, lowStock: low }; } });
+  if (!res) return;
+  act(() => { storeProduct({ id: p.id, name: p.name, ...res }); toast('產品設定已更新；已登錄的有效日期不會更動'); });
+}
+function demoState() {
+  const d = TODAY(), earlier = addDays(d, -7); let s = 1; const st = blankState(); const by = myName(), at = nowIso();
+  st.products = [{ id: productId('產品A（範例）'), name: '產品A（範例）', unit: '個', shelfDays: 14, lowStock: 80 }, { id: productId('產品B（範例）'), name: '產品B（範例）', unit: '盒', shelfDays: 30, lowStock: 20 }];
+  st.opening = [{ id: uid(), type: 'opening', seq: s++, product: '產品A（範例）', batch: 'A001', manufactureDate: addDays(d, -10), entryDate: earlier, expiryDate: addDays(d, 4), quantity: 100, note: '範例：同批第一製作日', by, at }, { id: uid(), type: 'opening', seq: s++, product: '產品A（範例）', batch: 'A001', manufactureDate: addDays(d, -8), entryDate: earlier, expiryDate: addDays(d, 6), quantity: 200, note: '範例：同批第二製作日', by, at }, { id: uid(), type: 'opening', seq: s++, product: '產品B（範例）', batch: 'B001', manufactureDate: addDays(d, -5), entryDate: earlier, expiryDate: addDays(d, 25), quantity: 50, note: '範例', by, at }];
+  st.movements = [{ id: uid(), type: 'production', seq: s++, date: addDays(d, -1), product: '產品A（範例）', batch: 'A001', manufactureDate: addDays(d, -1), expiryDate: addDays(d, 13), quantity: 150, note: '範例', by, at }, { id: uid(), type: 'shipment', seq: s++, date: d, product: '產品A（範例）', quantity: 250, orderNo: 'SO-001', note: '範例：自動先扣 100，再扣 150', by, at }];
+  return st;
+}
+async function seedDemo() {
+  if (!isAdmin()) return;
+  if (data.opening.length || data.movements.length || data.products.length) { if (!await modal({ title: '載入示範資料？', html: '<p>示範資料會取代雲端上所有人共用的資料，目前的紀錄將被刪除。</p><p class="modal-note">建議先下載 JSON 備份。</p>', ok: '取代並載入', danger: true })) return; }
+  act(() => { replaceAll(demoState()); resetForms(); go('dashboard'); toast('已載入示範資料：產品A 同批不同製作日期，出貨 250 個'); });
+}
+async function resetAll() {
+  if (!isAdmin()) return;
+  const ok = await modal({ title: '清除所有資料？', ok: '清除全部資料', danger: true,
+    html: '<p>將刪除雲端上所有人共用的資料，包含期初庫存、生產、出貨與產品設定。雲端每日備份仍會保留 30 天。</p><div class="field"><label for="mConfirm">請輸入「清除全部」確認</label><input id="mConfirm" autocomplete="off"></div><p class="modal-error" hidden></p>',
+    collect: b => { if (clean(b.querySelector('#mConfirm').value) !== '清除全部') throw Error('請輸入「清除全部」四個字'); return true; } });
+  if (!ok) return;
+  act(() => { replaceAll(blankState()); resetForms(); go('dashboard'); toast('資料已全部清除'); });
+}
+
+/* ---------- 下載（JSON / CSV / Excel） ---------- */
+function downloadFile(filename, content, mime, okMsg) {
+  try { const blob = content instanceof Blob ? content : new Blob([content], { type: mime || 'application/octet-stream' }); const url = URL.createObjectURL(blob); const a = document.createElement('a'); a.href = url; a.download = filename; document.body.appendChild(a); a.click(); a.remove(); setTimeout(() => URL.revokeObjectURL(url), 1500); toast(okMsg || '檔案已下載'); }
+  catch (e) { toast('無法下載檔案：' + e.message, true); }
+}
+function csvEscape(v) { const raw = String(v ?? ''); const safe = /^[\s]*[=+@-]/.test(raw) && !/^-?\d+(\.\d+)?$/.test(raw) ? `'${raw}` : raw; return `"${safe.replace(/"/g, '""')}"`; }
+function csvData(kind) {
+  const led = calculateLedger(), cur = calculateLedger(TODAY()), groups = groupLots(cur), products = productSummary(cur);
+  if (kind === 'opening') return ['期初庫存', ['入帳日期', '產品', '單位', '批號', '製作日期', '有效日期', '原始庫存', '備註', '登錄人'], data.opening.map(x => [x.entryDate, x.product, getUnit(x.product), x.batch, x.manufactureDate, x.expiryDate, x.quantity, x.note || '', x.by || ''])];
+  if (kind === 'production') return ['每日生產', ['生產入庫日期', '產品', '單位', '批號', '製作日期', '有效日期', '生產量', '備註', '登錄人'], data.movements.filter(x => x.type === 'production').map(x => [x.date, x.product, getUnit(x.product), x.batch, x.manufactureDate, x.expiryDate, x.quantity, x.note || '', x.by || ''])];
+  if (kind === 'shipment') return ['每日出貨', ['出貨日期', '產品', '單位', '出貨單號', '需求量', '實際出貨', '出貨缺口', '備註', '登錄人'], data.movements.filter(x => x.type === 'shipment').map(x => { const s = led.shipments.get(x.id); return [x.date, x.product, getUnit(x.product), x.orderNo || '', x.quantity, s?.shipped || 0, s?.shortage || 0, x.note || '', x.by || '']; })];
+  if (kind === 'batches') return ['批次庫存', ['產品', '單位', '批號', '製作日期', '有效日期', '期初庫存', '新增生產', '已出貨', '剩餘量', '狀態'], groups.map(x => [x.product, x.unit, x.batch, x.manufactureDate, x.expiryDate, x.opening, x.production, x.used, x.remaining, expiryStatus(x.expiryDate, x.remaining).label])];
+  if (kind === 'allocation') return ['出貨扣批明細', ['出貨日期', '出貨單號', '產品', '單位', '批號', '製作日期', '有效日期', '扣貨量', '類別'], allocationRows(led).map(x => [x.date, x.orderNo, x.product, x.unit, x.batch, x.manufactureDate, x.expiryDate, x.quantity, x.kind === 'shortage' ? '缺口' : '已分配'])];
+  return ['產品庫存總表', ['產品', '單位', '期初庫存', '累計生產', '累計扣貨', '可用庫存', '過期量', '近效期量', '最近有效日期', '低庫存警戒量'], products.map(x => [x.name, x.unit, x.opened, x.produced, x.used, x.usable, x.expired, x.warning, x.oldest, x.lowStock])];
+}
+function exportCsv(kind) { const [name, headers, records] = csvData(kind); const content = '﻿' + [headers, ...records].map(r => r.map(csvEscape).join(',')).join('\r\n'); downloadFile(`${name}_${TODAY()}.csv`, content, 'text/csv;charset=utf-8', `${name} CSV 已下載`); }
+function exportBackup() { downloadFile(`生產出貨庫存_FEFO備份_${TODAY()}.json`, JSON.stringify({ ...exportState(), exportedAt: nowIso(), exportedBy: myName() }, null, 2), 'application/json;charset=utf-8', '完整 JSON 備份已下載'); }
+let xlsxPromise = null;
+function loadXLSX() { if (window.XLSX) return Promise.resolve(window.XLSX); if (!xlsxPromise) xlsxPromise = new Promise((res, rej) => { const s = document.createElement('script'); s.src = 'https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js'; s.onload = () => window.XLSX ? res(window.XLSX) : rej(Error('Excel 元件載入失敗')); s.onerror = () => { xlsxPromise = null; s.remove(); rej(Error('Excel 元件載入失敗（需要網路），請改用各表的「匯出 CSV」')); }; document.head.appendChild(s); }); return xlsxPromise; }
+async function exportXlsx() {
+  toast('正在產生 Excel 檔…');
+  try { const XLSX = await loadXLSX(); const wb = XLSX.utils.book_new(); for (const kind of ['products', 'batches', 'opening', 'production', 'shipment', 'allocation']) { const [name, headers, records] = csvData(kind); const ws = XLSX.utils.aoa_to_sheet([headers, ...records]); ws['!cols'] = headers.map(h => ({ wch: Math.max(10, h.length * 2 + 2) })); XLSX.utils.book_append_sheet(wb, ws, name); }
+    const buf = XLSX.write(wb, { bookType: 'xlsx', type: 'array' }); downloadFile(`生產出貨庫存_完整明細_${TODAY()}.xlsx`, new Blob([buf], { type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' }), null, 'Excel 明細已下載（六張工作表）'); }
+  catch (err) { toast(err.message || 'Excel 產生失敗', true); }
+}
+
+/* ---------- 人員與權限（管理員）---------- */
+const U = { list: null, admins: [], loading: false, error: '' };
+async function loadUsers() {
+  if (!isAdmin() || U.loading) return;
+  U.loading = true; renderUsers();
+  try { const j = await FEAuth.api('users'); U.list = j.users || []; U.admins = j.admins || []; U.error = ''; }
+  catch (e) { U.error = e.message; }
+  U.loading = false; renderUsers();
+}
+function renderUsers() {
+  const root = $('userList');
+  if (!U.list) { root.innerHTML = U.error ? `<div class="banner bad">讀不到人員名單：${esc(U.error)}<button class="btn small" type="button" data-action="reload-users">重試</button></div>` : '<div class="empty">正在讀取人員名單…</div>'; return; }
+  const when = ms => ms ? new Date(ms).toLocaleString('zh-TW', { month: 'numeric', day: 'numeric', hour: '2-digit', minute: '2-digit' }) : '還沒登入過';
+  const admins = U.admins.map(a => `<div class="urow"><div class="urow-main"><b>${esc(a)}</b><div class="chips"><span class="chip perm">管理員：全部權限</span></div></div><span class="hint">要更換管理員，請改雲端後端 Code.gs 的 ADMIN_EMAILS_</span></div>`).join('');
+  const rows = U.list.map(u => `<div class="urow"><div class="urow-main"><b>${esc(u.name || u.email)}</b><span class="hint">${esc(u.email)} · 最後登入 ${esc(when(u.lastLogin))}</span><div class="chips">${u.enabled ? '' : '<span class="chip off">已停用</span>'}${(u.pages || []).map(p => `<span class="chip perm">${esc(PERM_LABEL[p] || p)}</span>`).join('') || '<span class="chip">只能查看</span>'}</div></div><div class="segment"><button class="btn small" type="button" data-action="edit-user" data-id="${esc(u.email)}">編輯</button><button class="btn small" type="button" data-action="toggle-user" data-id="${esc(u.email)}">${u.enabled ? '停用' : '啟用'}</button><button class="btn small danger" type="button" data-action="delete-user" data-id="${esc(u.email)}">刪除</button></div></div>`).join('');
+  root.innerHTML = `<div class="ulist">${admins}${rows}</div>${U.list.length ? '' : '<p class="helper">還沒有加入任何同事。按「＋ 新增人員」，輸入同事的 Gmail 並勾選權限。</p>'}${U.loading ? '<p class="helper">更新中…</p>' : ''}`;
+}
+async function openUserForm(u, isEdit = !!u, err = '') {
+  u = u || { email: '', name: '', pages: ['produce', 'ship'], enabled: true };
+  const res = await modal({ title: isEdit ? '編輯人員' : '新增人員', ok: '儲存',
+    html: `<p class="modal-note">同事用這個 Gmail 登入後，就能看到全部資料；下面勾選的是他能做的事。</p><div class="field"><label for="u-email">Gmail</label><input id="u-email" type="email" value="${esc(u.email)}" ${isEdit ? 'readonly' : ''} placeholder="name@gmail.com" autocomplete="off"></div><div class="field"><label for="u-name">姓名（顯示在登錄紀錄）</label><input id="u-name" value="${esc(u.name)}" placeholder="例如：王小明" maxlength="30"></div><div class="field"><label>權限</label><div class="perm-list">${PERMS.map(p => `<label class="perm" for="u-p-${p.id}"><input type="checkbox" id="u-p-${p.id}" value="${p.id}"${(u.pages || []).includes(p.id) ? ' checked' : ''}><span><b>${p.label}</b><span>${p.desc}</span></span></label>`).join('')}</div><span class="hint">都不勾＝只能查看與下載資料</span></div><p class="modal-error"${err ? '' : ' hidden'}>${esc(err)}</p>`,
+    collect: b => { const email = clean(b.querySelector('#u-email').value); if (!/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(email)) throw Error('請輸入正確的 Gmail 地址。'); return { email, name: clean(b.querySelector('#u-name').value), pages: PERMS.filter(p => b.querySelector('#u-p-' + p.id).checked).map(p => p.id) }; } });
+  if (!res) return;
+  try { const j = await FEAuth.api('userSave', { ...res, enabled: u.enabled !== false }); U.list = j.users || U.list; renderUsers(); toast(isEdit ? '已更新' : `已加入 ${res.email}，請他用這個 Gmail 登入`); }
+  catch (e) { openUserForm({ ...u, ...res }, isEdit, e.message); }
+}
+async function userCall(action, payload, okMsg) { try { const j = await FEAuth.api(action, payload); U.list = j.users || U.list; renderUsers(); toast(okMsg); } catch (e) { toast(e.message, true); } }
+
+/* ---------- 事件 ---------- */
+async function handleAction(el) {
+  const a = el.dataset.action, id = el.dataset.id;
+  if (a === 'backup') return exportBackup();
+  if (a === 'xlsx-all') return exportXlsx();
+  if (a === 'sync') return FEStore.syncNow();
+  if (a.startsWith('csv-')) return exportCsv(a.slice(4));
+  if (a === 'cancel-opening') return resetOpening();
+  if (a === 'cancel-production') return resetProduction();
+  if (a === 'cancel-shipment') return resetShipment();
+  if (a === 'reload-users') return loadUsers();
+  if (a === 'edit-user') { const u = (U.list || []).find(x => x.email === id); return u && openUserForm(u, true); }
+  if (a === 'toggle-user') { const u = (U.list || []).find(x => x.email === id); return u && userCall('userSave', { email: u.email, name: u.name, pages: u.pages, enabled: !u.enabled }, u.enabled ? '已停用，這個人會馬上被登出' : '已啟用'); }
+  if (a === 'delete-user') { const u = (U.list || []).find(x => x.email === id); if (!u || !await modal({ title: '刪除這位人員？', html: `<p>${esc(u.name || u.email)}（${esc(u.email)}）會馬上被登出，之後不能再登入。他登錄過的資料會保留。</p>`, ok: '刪除', danger: true })) return; return userCall('userDelete', { email: u.email }, '已刪除'); }
+  if (a === 'edit-opening' || a === 'edit-production') return can('produce') && populateEdit(a.slice(5), id);
+  if (a === 'edit-shipment') return can('ship') && populateEdit('shipment', id);
+  if (a === 'edit-product') return editProduct(id);
+  if (a.startsWith('delete-')) {
+    const typ = a.slice(7); if (!can(permFor(typ))) return;
+    const rec = typ === 'opening' ? data.opening.find(x => x.id === id) : data.movements.find(x => x.id === id); if (!rec) return;
+    if (!await modal({ title: '刪除這筆資料？', html: `<p>${esc(describeRec(rec))}</p><p class="modal-note">刪除後，所有庫存與歷史 FEFO 扣批會重新計算。</p>`, ok: '刪除', danger: true })) return;
+    return act(() => { FEStore.remove(kindOfRec(rec), rec.id); if (editOpening === id) resetOpening(); if (editProduction === id) resetProduction(); if (editShipment === id) resetShipment(); toast('已刪除，庫存及出貨分配已重算'); });
+  }
+  if (a === 'demo') return seedDemo();
+  if (a === 'import') return isAdmin() && $('importFile').click();
+  if (a === 'reset') return resetAll();
+}
+function bind() {
+  document.addEventListener('click', e => {
+    const el = e.target.closest('[data-action]'); if (el) { e.preventDefault(); handleAction(el); return; }
+    const v = e.target.closest('[data-view]'); if (v && v.tagName !== 'A') go(v.dataset.view);
+  });
+  window.addEventListener('hashchange', () => showView(location.hash.slice(1)));
+  $('sync').addEventListener('click', () => FEStore.syncNow());
+  $('logoutBtn').addEventListener('click', () => FEAuth.logout());
+  $('logoutBtn2').addEventListener('click', () => FEAuth.logout());
+  $('addUserBtn').addEventListener('click', () => openUserForm());
+  for (const id of ['openingFilter', 'productionFilter', 'shipmentFilter', 'batchFilter', 'allocationFilter', 'productFilter', 'settingFilter', 'batchLive', 'productLive']) $(id).addEventListener('input', scheduleRender);
+  $('openingForm').addEventListener('submit', saveOpening); $('productionForm').addEventListener('submit', saveProduction); $('shipmentForm').addEventListener('submit', saveShipment);
+  $('settingsForm').addEventListener('submit', e => { e.preventDefault(); if (!can('setting')) return; const w = Number($('warnDays').value), s = Number($('defaultShelf').value); if (!Number.isInteger(w) || w < 1 || w > 3650 || !Number.isInteger(s) || s < 0 || s > 36500) { toast('請填寫有效的預警及保存天數（整數）', true); return; } act(() => { FEStore.save('settings', { id: 'main', warnDays: w, defaultShelf: s }); toast('系統設定已儲存'); }); });
+  for (const p of ['o', 'p']) { for (const id of [`${p}Mfg`, `${p}Shelf`]) $(id).addEventListener('change', () => autoExpiry(p)); $(`${p}Product`).addEventListener('change', () => productDefaults(p)); }
+  $('pDate').addEventListener('change', () => { $('pMfg').value = $('pDate').value; autoExpiry('p'); });
+  for (const id of ['sDate', 'sProduct', 'sQty']) $(id).addEventListener('input', previewForShipment);
+  $('importFile').addEventListener('change', async e => {
+    const file = e.target.files && e.target.files[0]; e.target.value = ''; if (!file || !isAdmin()) return;
+    let incoming; try { incoming = validateImport(JSON.parse(await file.text())); } catch (err) { toast(`匯入失敗：${err.message}`, true, 6000); return; }
+    const ok = await modal({ title: '匯入 JSON 備份？', ok: '匯入並取代', danger: true, html: `<p>將以「${esc(file.name)}」取代雲端上所有人共用的資料。</p><ul class="modal-list"><li>產品 ${incoming.products.length} 項</li><li>期初庫存 ${incoming.opening.length} 筆</li><li>生產與出貨 ${incoming.movements.length} 筆</li></ul><p class="modal-note">建議先下載目前資料的備份。</p>` });
+    if (!ok) return;
+    act(() => { replaceAll(incoming); resetForms(); go('dashboard'); toast('匯入完成，正在上傳雲端；右上角變成「已同步」就完成了', false, 7000); });
+  });
+}
+
+/* ---------- 啟動 ---------- */
+let lastLoaded = false;
+FEStore.on((type, payload) => {
+  if (type === 'change') { rebuild(); scheduleRender(); }
+  else if (type === 'status') { renderSync(); renderBanner(); const l = !!FEStore.status().loaded; if (l !== lastLoaded) { lastLoaded = l; scheduleRender(); } }
+  else if (type === 'conflict') toast('有同事同時修改了同一筆資料，已自動合併；同一個欄位以你的修改為準。');
+});
+FEAuth.on(() => { applyPerms(); scheduleRender(); });
+bind(); resetForms(); showView(location.hash.slice(1) || 'dashboard'); renderSync();
+FEAuth.ready.then(() => { applyPerms(); rebuild(); resetForms(); render(); });
+if ('serviceWorker' in navigator && location.protocol === 'https:') {
+  window.addEventListener('load', () => { navigator.serviceWorker.register('service-worker.js').catch(() => {}); });
+}
+// 跨日（App 開著過午夜）時，「今天」與效期判斷跟著更新
+let lastDay = TODAY();
+setInterval(() => { const d = TODAY(); if (d !== lastDay) { lastDay = d; resetForms(); scheduleRender(); } }, 60000);

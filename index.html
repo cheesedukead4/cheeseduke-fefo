@@ -1,0 +1,153 @@
+<!doctype html>
+<html lang="zh-Hant">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<title>生產出貨庫存效期管理</title>
+<meta name="description" content="每日生產、出貨登錄，批次庫存與有效日期 FEFO 先到期先出管理">
+<meta name="theme-color" content="#153b48">
+<meta name="application-name" content="庫存效期">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="default">
+<meta name="apple-mobile-web-app-title" content="庫存效期">
+<link rel="manifest" href="manifest.webmanifest">
+<link rel="icon" href="icons/icon.svg" type="image/svg+xml">
+<link rel="apple-touch-icon" href="icons/icon-192.png">
+<link rel="stylesheet" href="css/app.css">
+<script src="config.js"></script>
+<script src="js/auth.js"></script>
+<script src="js/cloud-store.js"></script>
+<script src="js/app.js" defer></script>
+</head>
+<body>
+<div class="app" id="app">
+<aside class="sidebar">
+  <div class="brand"><div class="brand-kicker">CHEESE DUKE · FEFO</div><div class="brand-name">生產・出貨<br>庫存效期管理</div><div class="brand-sub">先到期先出貨</div></div>
+  <div class="nav-title">營運管理</div>
+  <nav class="nav" aria-label="主要功能">
+    <a class="nav-btn" href="#dashboard" data-view="dashboard"><span class="nav-ico" aria-hidden="true">◫</span>營運總覽</a>
+    <a class="nav-btn" href="#opening" data-view="opening"><span class="nav-ico" aria-hidden="true">▣</span>期初庫存建檔</a>
+    <a class="nav-btn" href="#production" data-view="production"><span class="nav-ico" aria-hidden="true">▤</span>每日生產登錄</a>
+    <a class="nav-btn" href="#shipment" data-view="shipment"><span class="nav-ico" aria-hidden="true">⇧</span>每日出貨登錄</a>
+    <a class="nav-btn" href="#batches" data-view="batches"><span class="nav-ico" aria-hidden="true">▦</span>批次庫存與效期</a>
+    <a class="nav-btn" href="#allocations" data-view="allocations"><span class="nav-ico" aria-hidden="true">≋</span>出貨扣批明細</a>
+    <a class="nav-btn" href="#products" data-view="products"><span class="nav-ico" aria-hidden="true">◈</span>產品庫存總表</a>
+    <a class="nav-btn" href="#manage" data-view="manage"><span class="nav-ico" aria-hidden="true">⚙</span>資料與設定</a>
+    <a class="nav-btn need-admin" href="#users" data-view="users"><span class="nav-ico" aria-hidden="true">☺</span>人員與權限</a>
+  </nav>
+  <div class="sidebar-bottom">
+    <div class="me"><span>登入：</span><b id="meName"></b></div>
+    <div id="recordInfo">讀取中…</div>
+    <button class="btn small rail-btn" id="logoutBtn" type="button">登出</button>
+  </div>
+</aside>
+<main class="main">
+  <header class="topbar">
+    <div>
+      <div class="eyebrow-row"><span class="eyebrow">INVENTORY CONTROL / FEFO</span><button type="button" id="sync" class="sync busy" title="按一下立即同步"><i aria-hidden="true"></i><span>連線中…</span></button></div>
+      <h1 id="pageTitle">營運總覽</h1>
+      <p class="subtitle" id="pageSub">每日生產、出貨及批次有效日期，即時統整。</p>
+    </div>
+    <div class="top-actions"><span class="me-mobile">登入：<b id="meName2"></b> <button class="linklike" id="logoutBtn2" type="button">登出</button></span><button type="button" class="btn" data-action="backup">↧ 備份資料</button><a class="btn primary need-ship" href="#shipment" data-view="shipment">＋ 新增出貨</a></div>
+  </header>
+  <div id="banner" class="banners"></div>
+
+  <section id="dashboard" class="section active">
+    <div id="welcome" class="panel welcome" hidden><div class="panel-body">
+      <h2>開始使用</h2>
+      <p class="welcome-intro">資料存在雲端，名單內的同事打開 App 都會看到同一份庫存；任何人登錄後，其他人的畫面約 30 秒內自動更新。目前還沒有任何紀錄，可以從下面的方式開始：</p>
+      <div class="welcome-grid">
+        <div class="welcome-item need-admin"><b>從舊版搬資料</b><p>在舊的網頁版或離線版按「備份資料」下載 JSON，再到這裡匯入。期初庫存、生產、出貨與產品設定會一起搬過來。</p><button type="button" class="btn primary small" data-action="import">↥ 匯入 JSON 備份</button></div>
+        <div class="welcome-item need-produce"><b>從頭建立</b><p>先到「期初庫存建檔」登錄現有的批號、製作日期與有效日期，之後每天登錄生產與出貨。</p><a class="btn small" href="#opening" data-view="opening">建立期初庫存</a></div>
+        <div class="welcome-item need-admin"><b>先看示範</b><p>載入兩個範例產品，試試同批不同製作日期的 FEFO 扣批。之後可在「資料與設定」清除。</p><button type="button" class="btn small" data-action="demo">載入示範資料</button></div>
+      </div>
+    </div></div>
+    <div id="summaryCards" class="grid-kpi"></div>
+    <div id="shortageAlert" class="notice warning" hidden></div>
+    <div class="panel-split">
+      <div class="panel"><div class="panel-head"><div><h2>最近 7 天生產 / 出貨趨勢</h2><p>依入庫日與出貨日統計，出貨以實際分配量計算</p></div></div><div class="panel-body"><div id="trendChart" class="chart"></div><div class="chart-legend"><span><b class="lg-a"></b>生產量</span><span><b class="lg-b"></b>實際出貨量</span><span class="scale" id="chartScale"></span></div></div></div>
+      <div class="panel"><div class="panel-head"><div><h2>快速開始</h2><p>依序輸入，每張表單自動連動</p></div></div><div class="panel-body"><ol class="step-list"><li>於「期初庫存建檔」填入原始庫存、批號、製作日期與效期。</li><li>每日生產後新增入庫資料，庫存同步增加。</li><li>每日出貨只需輸入產品與數量，自動分配最早效期的存貨。</li><li>至「出貨扣批明細」查看實際扣除的製作日期與批號。</li></ol><hr class="separator"><div class="segment"><a class="btn ghost small need-produce" href="#opening" data-view="opening">建立期初庫存</a><a class="btn ghost small need-produce" href="#production" data-view="production">填寫今日生產</a><a class="btn ghost small need-ship" href="#shipment" data-view="shipment">登錄出貨</a></div></div></div>
+    </div>
+    <div class="panel"><div class="panel-head"><div><h2>庫存效期預警</h2><p>最早到期的庫存會優先列出；已過期庫存不再參與出貨</p></div><a class="btn small" href="#batches" data-view="batches">查看全部批次</a></div><div id="dashExpiry" class="table-scroll"></div></div>
+    <div class="panel"><div class="panel-head"><div><h2>近期出貨</h2><p>顯示實際出貨、扣批結果與出貨缺口</p></div></div><div id="dashShipments" class="table-scroll"></div></div>
+  </section>
+
+  <section id="opening" class="section">
+    <p class="section-intro">登錄開始使用系統前已經有的庫存。同一產品、同一批號可有多筆不同製作日期，每筆都會獨立追蹤效期。</p>
+    <div class="panel form-area need-produce"><div class="panel-head"><div><h2 id="openingFormTitle">新增期初庫存</h2><p>入帳日決定這批庫存從哪一天開始可以被出貨扣除。</p></div></div><div class="panel-body"><form id="openingForm" class="form-grid" novalidate>
+      <div class="field"><label for="oProduct">產品名稱 *</label><input id="oProduct" list="productNames" required placeholder="輸入品號或品名" maxlength="80" autocomplete="off"></div>
+      <div class="field"><label for="oUnit">單位 *</label><input id="oUnit" required value="個" maxlength="12" placeholder="個／盒／公斤"></div>
+      <div class="field"><label for="oBatch">批號 *</label><input id="oBatch" required placeholder="例如：20261109" maxlength="60" autocomplete="off"></div>
+      <div class="field"><label for="oQty">原始庫存數量 *</label><input id="oQty" type="number" inputmode="decimal" required step="0.001" min="0.001" placeholder="0"></div>
+      <div class="field"><label for="oMfg">製作日期 *</label><input id="oMfg" type="date" required></div>
+      <div class="field"><label for="oEntry">庫存入帳日期 *</label><input id="oEntry" type="date" required></div>
+      <div class="field"><label for="oShelf">保存天數</label><input id="oShelf" type="number" inputmode="numeric" min="0" max="36500" step="1" value="30"><span class="hint">調整後自動帶入有效日期</span></div>
+      <div class="field"><label for="oExpiry">有效日期 *</label><input id="oExpiry" type="date" required><span class="hint">可自行修改，不受保存天數限制</span></div>
+      <div class="field span2"><label for="oNote">備註</label><input id="oNote" maxlength="180" placeholder="選填"></div>
+      <div class="field span2"><label class="spacer-label">&nbsp;</label><div class="form-actions"><button id="oSubmit" type="submit" class="btn primary">＋ 儲存期初庫存</button><button type="button" class="btn hide" id="oCancel" data-action="cancel-opening">取消編輯</button></div></div>
+    </form></div></div>
+    <div class="panel"><div class="panel-head"><div><h2>期初庫存清單</h2><p id="openingCount">0 筆資料</p></div><div class="toolbar"><input id="openingFilter" class="search" type="search" placeholder="搜尋產品／批號" aria-label="搜尋期初庫存"><button type="button" class="btn small" data-action="csv-opening">匯出 CSV</button></div></div><div id="openingTable" class="table-scroll"></div></div>
+  </section>
+
+  <section id="production" class="section">
+    <p class="section-intro">每日生產完成後登錄，商品會依入庫日期建立新庫存。同一批號有不同製作日期時，系統分別管理。</p>
+    <div class="panel form-area need-produce"><div class="panel-head"><div><h2 id="productionFormTitle">新增每日生產資料</h2><p>出貨時會把這裡的生產量與期初庫存一併納入先到期先出計算。</p></div></div><div class="panel-body"><form id="productionForm" class="form-grid" novalidate>
+      <div class="field"><label for="pDate">生產入庫日期 *</label><input id="pDate" type="date" required></div>
+      <div class="field"><label for="pProduct">產品名稱 *</label><input id="pProduct" list="productNames" required placeholder="輸入品號或品名" maxlength="80" autocomplete="off"></div>
+      <div class="field"><label for="pUnit">單位 *</label><input id="pUnit" required value="個" maxlength="12"></div>
+      <div class="field"><label for="pBatch">批號 *</label><input id="pBatch" required placeholder="例如：20261109" maxlength="60" autocomplete="off"></div>
+      <div class="field"><label for="pQty">本次生產數量 *</label><input id="pQty" type="number" inputmode="decimal" required step="0.001" min="0.001" placeholder="0"></div>
+      <div class="field"><label for="pMfg">製作日期 *</label><input id="pMfg" type="date" required></div>
+      <div class="field"><label for="pShelf">保存天數</label><input id="pShelf" type="number" inputmode="numeric" min="0" max="36500" step="1" value="30"></div>
+      <div class="field"><label for="pExpiry">有效日期 *</label><input id="pExpiry" type="date" required></div>
+      <div class="field span2"><label for="pNote">備註</label><input id="pNote" maxlength="180" placeholder="選填"></div>
+      <div class="field span2"><label class="spacer-label">&nbsp;</label><div class="form-actions"><button id="pSubmit" type="submit" class="btn primary">＋ 儲存生產紀錄</button><button type="button" class="btn hide" id="pCancel" data-action="cancel-production">取消編輯</button></div></div>
+    </form></div></div>
+    <div class="panel"><div class="panel-head"><div><h2>每日生產紀錄</h2><p id="productionCount">0 筆資料</p></div><div class="toolbar"><input id="productionFilter" class="search" type="search" placeholder="搜尋日期／產品／批號" aria-label="搜尋生產紀錄"><button type="button" class="btn small" data-action="csv-production">匯出 CSV</button></div></div><div id="productionTable" class="table-scroll"></div></div>
+  </section>
+
+  <section id="shipment" class="section">
+    <p class="section-intro">只需輸入產品與需求出貨量，系統會依「出貨當日有效、已入庫、有餘量」的庫存，先扣最早到期者，不足再往下一個製作日期／批號扣除。</p>
+    <div class="panel form-area need-ship"><div class="panel-head"><div><h2 id="shipmentFormTitle">新增每日出貨資料</h2><p>系統不會扣除尚未入庫或已過期的存貨；不足量會另外列為出貨缺口。</p></div></div><div class="panel-body"><form id="shipmentForm" class="form-grid" novalidate>
+      <div class="field"><label for="sDate">出貨日期 *</label><input id="sDate" type="date" required></div>
+      <div class="field span2"><label for="sProduct">出貨產品 *</label><input id="sProduct" list="productNames" required placeholder="輸入品號或品名，從清單選擇" maxlength="80" autocomplete="off"></div>
+      <div class="field"><label for="sQty">需求出貨數量 *</label><input id="sQty" type="number" inputmode="decimal" required step="0.001" min="0.001" placeholder="0"></div>
+      <div class="field span2"><label for="sOrder">出貨單號／客戶</label><input id="sOrder" placeholder="選填，例如：SO-0001" maxlength="80"></div>
+      <div class="field span2"><label for="sNote">備註</label><input id="sNote" placeholder="選填" maxlength="180"></div>
+      <div class="field span4"><div id="shipmentPreview" class="notice">選擇產品並輸入數量，即可預覽最早效期庫存與可能的缺口。</div><div class="form-actions"><button id="sSubmit" type="submit" class="btn primary">＋ 儲存出貨紀錄</button><button id="sCancel" type="button" class="btn hide" data-action="cancel-shipment">取消編輯</button></div></div>
+    </form></div></div>
+    <div class="panel"><div class="panel-head"><div><h2>每日出貨紀錄</h2><p id="shipmentCount">0 筆資料</p></div><div class="toolbar"><input id="shipmentFilter" class="search" type="search" placeholder="搜尋日期／產品／出貨單" aria-label="搜尋出貨紀錄"><button type="button" class="btn small" data-action="csv-shipment">匯出 CSV</button></div></div><div id="shipmentTable" class="table-scroll"></div></div>
+  </section>
+
+  <section id="batches" class="section">
+    <div class="notice">批次庫存依「產品＋批號＋製作日期＋有效日期」彙整。同一批號有多個製作日期時會分成多列，避免庫存與效期混淆。已過期的剩餘庫存會顯示，但不會被安排出貨。</div>
+    <div class="panel"><div class="panel-head"><div><h2>批次庫存與有效日期</h2><p id="batchCount">可依效期排序及搜尋；已出貨量依 FEFO 即時計算</p></div><div class="toolbar"><label class="tog" for="batchLive"><input type="checkbox" id="batchLive" checked>只看有庫存</label><input id="batchFilter" class="search" type="search" placeholder="搜尋產品／批號／製作日期" aria-label="搜尋批次庫存"><button type="button" class="btn small" data-action="csv-batches">匯出 CSV</button></div></div><div id="batchTable" class="table-scroll"></div></div>
+  </section>
+
+  <section id="allocations" class="section">
+    <div class="notice warning">出貨扣批紀錄會按所有資料的「入帳日期／生產日期／出貨日期」重新計算。若事後修改或補登較早日期的資料，歷史扣批結果也可能改變；需要不可修改的正式出貨帳，建議定期保留 JSON 備份。</div>
+    <div class="panel"><div class="panel-head"><div><h2>逐筆出貨扣批明細</h2><p id="allocationCount">同張出貨單可分配至不同製作日期和批號</p></div><div class="toolbar"><input id="allocationFilter" class="search" type="search" placeholder="搜尋單號／產品／批號" aria-label="搜尋扣批明細"><button type="button" class="btn small" data-action="csv-allocation">匯出 CSV</button></div></div><div id="allocationTable" class="table-scroll"></div></div>
+  </section>
+
+  <section id="products" class="section">
+    <div class="panel"><div class="panel-head"><div><h2>產品庫存總表</h2><p>每個產品依其單位獨立統計，避免不同單位相加造成誤判。</p></div><div class="toolbar"><label class="tog" for="productLive"><input type="checkbox" id="productLive">只看有庫存</label><input id="productFilter" class="search" type="search" placeholder="搜尋品號或品名" aria-label="搜尋產品庫存"><button type="button" class="btn small" data-action="csv-products">匯出 CSV</button></div></div><div id="productTable" class="table-scroll"></div></div>
+  </section>
+
+  <section id="manage" class="section">
+    <div class="panel"><div class="panel-head"><div><h2>效期與產品設定</h2><p>新的產品會在首次登錄期初庫存或生產紀錄時自動建立。</p></div></div><div class="panel-body"><form id="settingsForm" class="form-grid need-setting" novalidate><div class="field"><label for="warnDays">提前預警天數</label><input id="warnDays" type="number" inputmode="numeric" min="1" max="3650" step="1" value="30"></div><div class="field"><label for="defaultShelf">新產品預設保存天數</label><input id="defaultShelf" type="number" inputmode="numeric" min="0" max="36500" step="1" value="30"></div><div class="field span2"><label class="spacer-label">&nbsp;</label><div class="form-actions"><button type="submit" class="btn primary">儲存設定</button></div></div></form><hr class="separator need-setting"><div class="helper">每個產品可以另外設定單位、保存天數及低庫存警戒量。調整保存天數不會更改已經登錄的有效日期。</div><div class="toolbar settings-tools"><input id="settingFilter" class="search" type="search" placeholder="搜尋品號或品名" aria-label="搜尋產品設定"></div><div id="productSettingsTable" class="table-scroll"></div></div></div>
+    <div class="panel"><div class="panel-head"><div><h2>資料備份及匯入</h2><p>資料存在雲端；每台裝置也會留一份，離線時可以繼續查看與登錄。</p></div></div><div class="panel-body"><div class="segment"><button type="button" class="btn primary" data-action="backup">↧ 下載完整 JSON 備份</button><button type="button" class="btn" data-action="xlsx-all">↧ 下載完整 Excel 明細</button><button type="button" class="btn need-admin" data-action="import">↥ 匯入 JSON 備份</button><button type="button" class="btn need-admin" data-action="demo">載入示範資料</button><button type="button" class="btn danger need-admin" data-action="reset">清除所有資料</button></div><input id="importFile" class="hide" type="file" accept=".json,application/json"><div class="notice warning" style="margin-top:18px;margin-bottom:0">雲端每天凌晨會自動備份一次（保留 30 天）。匯入備份會取代所有人共用的資料，只有管理員能操作。JSON 備份與舊的網頁版、離線版通用；Excel 明細包含六張工作表，方便對帳。</div></div></div>
+    <div class="panel"><div class="panel-head"><div><h2>出貨規則說明</h2></div></div><div class="panel-body"><ol class="step-list"><li><strong>先到期先出（FEFO）：</strong>按有效日期由近至遠扣除，效期相同時依製作日期較早者優先。</li><li><strong>同批不同製作日：</strong>每筆庫存用產品、批號、製作日期與有效日期辨識，不合併錯誤的效期。</li><li><strong>歷史日期：</strong>按實際入帳及出貨日期排序，同日先入庫後出貨；不動用尚未入庫的貨。</li><li><strong>已過期：</strong>效期早於出貨日期的貨不會分配，但仍顯示於待處理庫存。</li><li><strong>庫存不足：</strong>實際出貨不超過可用庫存，超出的需求保留為「出貨缺口」，不會製造負庫存。</li></ol></div></div>
+  </section>
+
+  <section id="users" class="section">
+    <div class="panel"><div class="panel-head"><div><h2>人員與權限</h2><p>用 Gmail 加入同事，勾選每個人能做的事。名單內的人都能查看全部資料；權限決定能不能新增與修改。</p></div><button class="btn primary" type="button" id="addUserBtn">＋ 新增人員</button></div><div class="panel-body" id="userList"></div></div>
+  </section>
+  <footer class="footer">資料存在雲端並自動同步給名單內的同事；離線時修改會先存在這台裝置，恢復網路後自動上傳。</footer>
+</main>
+</div>
+<datalist id="productNames"></datalist>
+<div id="toast" class="toast" role="status" aria-live="polite" hidden></div>
+<div id="modal" class="modal" hidden><form id="modalForm" class="modal-card" role="dialog" aria-modal="true" aria-labelledby="modalTitle" novalidate><h3 id="modalTitle"></h3><div id="modalBody" class="modal-body"></div><div class="modal-actions"><button type="button" class="btn" id="modalCancel">取消</button><button type="submit" class="btn primary" id="modalOk">確定</button></div></form></div>
+</body>
+</html>
