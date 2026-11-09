@@ -6,9 +6,9 @@
  * FE_CLOUD.url：本 App 的 Apps Script 網頁應用程式網址（結尾 /exec），見「使用說明.md」第 2 步。
  */
 window.FE_AUTH = {
-  clientId: ''
+  clientId: '916301580469-tbugbbui1i6jc7ogn1gncc1hg13d27uq.apps.googleusercontent.com'
 };
 
 window.FE_CLOUD = {
-  url: ''
+  url: 'https://script.google.com/macros/s/AKfycbw6lXjLpThegaOjnz4ZajGK8limP5Iq-O_Y7IhQZrG7eCJUzX0vcGEnRueq2Bn1G8nG0Q/exec'
 };
