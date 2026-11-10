@@ -70,7 +70,7 @@
       <div class="panel"><div class="panel-head"><div><h2>最近 7 天生產 / 出貨趨勢</h2><p>依入庫日與出貨日統計，出貨以實際分配量計算</p></div></div><div class="panel-body"><div id="trendChart" class="chart"></div><div class="chart-legend"><span><b class="lg-a"></b>生產量</span><span><b class="lg-b"></b>實際出貨量</span><span class="scale" id="chartScale"></span></div></div></div>
       <div class="panel"><div class="panel-head"><div><h2>快速開始</h2><p>依序輸入，每張表單自動連動</p></div></div><div class="panel-body"><ol class="step-list"><li>於「期初庫存建檔」填入原始庫存、批號、製作日期與效期。</li><li>每日生產後新增入庫資料，庫存同步增加。</li><li>每日出貨只需輸入產品與數量，自動分配最早效期的存貨。</li><li>至「出貨扣批明細」查看實際扣除的製作日期與批號。</li></ol><hr class="separator"><div class="segment"><a class="btn ghost small need-produce" href="#opening" data-view="opening">建立期初庫存</a><a class="btn ghost small need-produce" href="#production" data-view="production">填寫今日生產</a><a class="btn ghost small need-ship" href="#shipment" data-view="shipment">登錄出貨</a></div></div></div>
     </div>
-    <div class="panel"><div class="panel-head"><div><h2>庫存效期預警</h2><p>最早到期的庫存會優先列出；已過期庫存不再參與出貨</p></div><a class="btn small" href="#batches" data-view="batches">查看全部批次</a></div><div id="dashExpiry" class="table-scroll"></div></div>
+    <div class="panel"><div class="panel-head"><div><h2>庫存效期預警</h2><p>15 天內到期與已過期的庫存，每個品號一列、依品號排列；已過期庫存不再參與出貨</p></div><a class="btn small" href="#batches" data-view="batches">查看全部批次</a></div><div id="dashExpiry" class="table-scroll"></div></div>
     <div class="panel"><div class="panel-head"><div><h2>近期出貨</h2><p>顯示實際出貨、扣批結果與出貨缺口</p></div></div><div id="dashShipments" class="table-scroll"></div></div>
   </section>
 
