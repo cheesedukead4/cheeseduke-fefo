@@ -461,6 +461,11 @@ const canPortal = () => can('produce') || can('ship');
 const portalMeta = () => FEStore.get('settings', 'portal') || {};
 function defaultSyncFrom() { const last = data.opening.reduce((m, r) => r.entryDate > m ? r.entryDate : m, ''); return last ? addDays(last, 1) : ''; }
 const syncFromDate = () => isDate(portalMeta().syncFrom) ? portalMeta().syncFrom : defaultSyncFrom();
+// 只同步這些開頭的品號（品號第一段「-」前面的英文，例如 CK-01|YB-08 → CK）；設定存在 settings 'portal'.prefixes
+const DEFAULT_PREFIXES = ['CK', 'CC', 'CA', 'CL', 'CS', 'KA'];
+const parsePrefixes = s => [...new Set(String(s || '').toUpperCase().split(/[\s,，、;；]+/).map(x => x.trim()).filter(x => /^[A-Z0-9]{1,10}$/.test(x)))];
+const portalPrefixes = () => { const p = portalMeta().prefixes; return Array.isArray(p) && p.length ? p : DEFAULT_PREFIXES; };
+const codePrefix = code => String(code).split(/[-|]/)[0].toUpperCase();
 const productCodeOf = name => { const s = clean(name), i = s.indexOf(' '); return i > 0 ? s.slice(0, i) : s; };
 function decodeB64url(s) { s = s.replace(/-/g, '+').replace(/_/g, '/'); while (s.length % 4) s += '='; return JSON.parse(decodeURIComponent(escape(atob(s)))); }
 // 書籤資料整理乾淨：{ v:1, t: 書籤當天, d: { 日期: [[品號, 品名, 半成品入庫, 實際揀貨], ...] }, w: 讀取失敗的日期說明 }
@@ -493,6 +498,8 @@ function applyPortalPending() {
   portalApplying = true;
   try {
     const c = cleanPortal(decodeB64url(raw)), today = TODAY(), from = syncFromDate();
+    const prefixes = portalPrefixes(), skippedCodes = new Set();
+    for (const ds of Object.keys(c.days)) c.days[ds] = c.days[ds].filter(r => prefixes.includes(codePrefix(r.code)) || (skippedCodes.add(r.code), false));
     const all = Object.keys(c.days).sort();
     const dates = all.filter(d => d <= today && (!from || d >= from));
     const before = all.filter(d => from && d < from);
@@ -531,7 +538,7 @@ function applyPortalPending() {
     FEStore.save('settings', { ...meta, id: 'portal', at: Date.now(), by: who, first: dates[0] || '', last: dates[dates.length - 1] || '', days: dates.length, ...sum, pQ: clampQty(sum.pQ), sQ: clampQty(sum.sQ), newProducts: newProducts.length, changed: saves.length + removes.length, warn: c.warn });
     const range = dates.length ? `${shortDate(dates[0])}～${shortDate(dates[dates.length - 1])}` : '沒有可匯入的日期';
     const parts = [okP ? `生產 ${sum.pN} 筆（${fmt(sum.pQ)} 個）` : '', okS ? `出貨 ${sum.sN} 筆（${fmt(sum.sQ)} 個）` : ''].filter(Boolean).join('、');
-    const notes = [newProducts.length ? `新增產品 ${newProducts.length} 項` : '', before.length ? `起算日 ${from} 以前的 ${before.length} 天沒有匯入` : '', !okP ? '你沒有生產權限，生產數字沒有存' : '', !okS ? '你沒有出貨權限，出貨數字沒有存' : '', c.warn ? '注意：' + c.warn : ''].filter(Boolean).join('；');
+    const notes = [newProducts.length ? `新增產品 ${newProducts.length} 項` : '', skippedCodes.size ? `略過 ${prefixes.join('、')} 以外的品號 ${skippedCodes.size} 個` : '', before.length ? `起算日 ${from} 以前的 ${before.length} 天沒有匯入` : '', !okP ? '你沒有生產權限，生產數字沒有存' : '', !okS ? '你沒有出貨權限，出貨數字沒有存' : '', c.warn ? '注意：' + c.warn : ''].filter(Boolean).join('；');
     toast(`已同步入口網站 ${range}：${parts}${saves.length + removes.length ? '' : '（數字都沒變）'}${notes ? '。' + notes : ''}`, false, 9000);
     go('portal');
   } catch (e) { toast('入口網站資料讀取失敗：' + e.message, true, 8000); }
@@ -562,6 +569,8 @@ function renderPortal() {
     ['起算日', from || '不限', isDate(m.syncFrom) ? '手動設定' : '期初庫存入帳日的隔天', ''],
   ].map(([l, v, d, c]) => `<article class="kpi ${c}"><div class="kpi-label">${esc(l)}</div><div class="kpi-value" style="font-size:20px">${esc(v)}</div><div class="kpi-desc">${esc(d)}</div></article>`).join('');
   const fEl = $('portalFrom'); if (document.activeElement !== fEl) fEl.value = from || '';
+  const pEl = $('portalPrefixes'); if (document.activeElement !== pEl) pEl.value = portalPrefixes().join(', ');
+  $('portalPrefixText').textContent = portalPrefixes().join('、');
   $('portalFromHint').textContent = isDate(m.syncFrom) ? '' : '目前用預設：期初庫存最晚入帳日的隔天';
   const ledger = calculateLedger(), by = new Map();
   for (const r of data.movements) {
@@ -648,7 +657,13 @@ function bind() {
   for (const id of ['sDate', 'sProduct', 'sQty']) $(id).addEventListener('input', previewForShipment);
   const bm = $('portalBm'); bm.setAttribute('href', portalBookmarklet());
   bm.addEventListener('click', e => { e.preventDefault(); toast('請把這顆按鈕「拖曳」到瀏覽器的書籤列，再到入口網站的頁面按書籤。'); });
-  $('portalFromForm').addEventListener('submit', e => { e.preventDefault(); if (!can('setting')) return; const v = $('portalFrom').value; if (v && !isDate(v)) { toast('請選擇有效的日期', true); return; } act(() => { FEStore.save('settings', { ...portalMeta(), id: 'portal', syncFrom: v || '' }); toast(v ? `起算日已設為 ${v}；之後同步只匯入這天以後的數字` : '已改回預設起算日'); }); });
+  $('portalFromForm').addEventListener('submit', e => {
+    e.preventDefault(); if (!can('setting')) return;
+    const v = $('portalFrom').value, px = parsePrefixes($('portalPrefixes').value);
+    if (v && !isDate(v)) { toast('請選擇有效的日期', true); return; }
+    if (!px.length) { toast('請至少填一個品號開頭，例如 CK', true); return; }
+    act(() => { FEStore.save('settings', { ...portalMeta(), id: 'portal', syncFrom: v || '', prefixes: px }); toast(`同步設定已儲存：起算日 ${v || '預設（' + (defaultSyncFrom() || '不限') + '）'}，品號開頭 ${px.join('、')}。下次同步生效`); });
+  });
   $('importFile').addEventListener('change', async e => {
     const file = e.target.files && e.target.files[0]; e.target.value = ''; if (!file || !isAdmin()) return;
     let incoming; try { incoming = validateImport(JSON.parse(await file.text())); } catch (err) { toast(`匯入失敗：${err.message}`, true, 6000); return; }
