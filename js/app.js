@@ -69,7 +69,7 @@ const blankState = () => ({ version: 1, products: [], opening: [], movements: []
 /* ---------- 狀態 ---------- */
 let data = blankState();
 let currentView = 'dashboard';
-let editOpening = null, editProduction = null, editShipment = null;
+let editOpening = null;
 const loading = () => !FEStore.status().loaded;
 
 const getProduct = name => data.products.find(p => p.name === clean(name));
@@ -241,16 +241,15 @@ function table(columns, rows, empty = '尚無資料') {
 function searchable(rows, term, fields) { const q = clean(term).toLowerCase(); return !q ? rows : rows.filter(r => fields.some(k => String(r[k] ?? '').toLowerCase().includes(q))); }
 const permFor = type => type === 'shipment' ? 'ship' : 'produce';
 const manageCol = type => can(permFor(type)) ? ['管理'] : [];
-const manageCell = (kind, id) => String(id).startsWith('pt-') ? (can(permFor(kind)) ? td('<span class="pill other" title="入口網站同步的數字，要修改請在入口網站改後再同步">入口網站</span>') : '') : can(permFor(kind)) ? td(`<div class="segment"><button type="button" class="btn small" data-action="edit-${kind}" data-id="${esc(id)}">修改</button><button type="button" class="btn small danger" data-action="delete-${kind}" data-id="${esc(id)}">刪除</button></div>`) : '';
+const manageCell = (kind, id) => String(id).startsWith('pt-') ? (can(permFor(kind)) ? td('<span class="pill other" title="入口網站同步的數字，要修改請在入口網站改後再同步">入口網站</span>') : '') : can(permFor(kind)) ? td(`<div class="segment">${kind === 'opening' ? `<button type="button" class="btn small" data-action="edit-${kind}" data-id="${esc(id)}">修改</button>` : ''}<button type="button" class="btn small danger" data-action="delete-${kind}" data-id="${esc(id)}">刪除</button></div>`) : '';
 
-const VIEWS = { dashboard: ['營運總覽', '每日生產、出貨及批次有效日期，即時統整。'], opening: ['期初庫存建檔', '原始庫存按製作日期分開管理，不需擔心同批不同效期。'], production: ['每日生產登錄', '每筆生產都會自動增加可出貨批次庫存。'], shipment: ['每日出貨登錄', '自動從有效期最近的庫存開始扣除。'], portal: ['入口網站同步', '從入口網站總表帶入每日半成品入庫（生產）與實際揀貨（出貨）。'], batches: ['批次庫存與效期', '依製作日期和有效日期追蹤每一批剩餘量。'], allocations: ['出貨扣批明細', '每張出貨單實際扣除了哪些製作日期，一目了然。'], products: ['產品庫存總表', '總庫存、近效期及過期量依產品清楚呈現。'], manage: ['資料與設定', '備份、效期預警及產品基本設定。'], users: ['人員與權限', '管理誰可以登入，以及每個人能做的事。'] };
+const VIEWS = { dashboard: ['營運總覽', '每日生產、出貨及批次有效日期，即時統整。'], opening: ['期初庫存建檔', '原始庫存按製作日期分開管理，不需擔心同批不同效期。'], production: ['每日生產紀錄', '入口網站同步帶入的每日生產，自動增加可出貨批次庫存。'], shipment: ['每日出貨紀錄', '入口網站同步帶入的實際揀貨，自動從有效期最近的庫存開始扣除。'], portal: ['入口網站同步', '從入口網站總表帶入每日半成品入庫（生產）與實際揀貨（出貨）。'], batches: ['批次庫存與效期', '依製作日期和有效日期追蹤每一批剩餘量。'], allocations: ['出貨扣批明細', '每張出貨單實際扣除了哪些製作日期，一目了然。'], products: ['產品庫存總表', '總庫存、近效期及過期量依產品清楚呈現。'], manage: ['資料與設定', '備份、效期預警及產品基本設定。'], users: ['人員與權限', '管理誰可以登入，以及每個人能做的事。'] };
 function showView(view) {
   if (!VIEWS[view] || (view === 'users' && !isAdmin()) || (view === 'portal' && window.FEAuth && FEAuth.user() && !canPortal())) { view = 'dashboard'; if (location.hash && location.hash !== '#dashboard') try { history.replaceState(null, '', '#dashboard'); } catch (e) {} }
   const changed = currentView !== view; currentView = view;
   document.querySelectorAll('.section').forEach(e => e.classList.toggle('active', e.id === view));
   document.querySelectorAll('.nav-btn').forEach(b => b.classList.toggle('active', b.dataset.view === view));
   $('pageTitle').textContent = VIEWS[view][0]; $('pageSub').textContent = VIEWS[view][1];
-  if (view === 'shipment') previewForShipment();
   if (view === 'users') loadUsers();
   if (changed) try { window.scrollTo({ top: 0 }); } catch (e) {}
 }
@@ -265,7 +264,6 @@ function render() {
   const empty = !data.opening.length && !data.movements.length;
   $('welcome').hidden = loading() || !empty || !(isAdmin() || can('produce'));
   $('recordInfo').textContent = loading() ? '讀取中…' : `共 ${data.opening.length + data.movements.length} 筆紀錄｜${data.products.length} 項產品`;
-  if (currentView === 'shipment') previewForShipment();
 }
 function renderDashboard(today, current, groups, prod) {
   const todayProductions = data.movements.filter(x => x.type === 'production' && x.date === today).map(x => ({ quantity: x.quantity, unit: getUnit(x.product) }));
@@ -312,7 +310,7 @@ function chipCell(recs, chip, kind, product) {
   const more = recs.length > CHIP_MAX ? `<button type="button" class="pill other exp-chip linkchip" data-action="detail-${kind}" data-id="${esc(product)}">還有 ${recs.length - CHIP_MAX} 筆…</button>` : '';
   return `<td class="exp-cell"><div class="exp-chips">${recs.slice(0, CHIP_MAX).map(chip).join('')}${more}</div></td>`;
 }
-const detailBtn = (kind, product) => td(`<button type="button" class="btn small" data-action="detail-${kind}" data-id="${esc(product)}">明細${(kind === 'allocation' || !can(permFor(kind))) ? '' : '／修改'}</button>`);
+const detailBtn = (kind, product) => td(`<button type="button" class="btn small" data-action="detail-${kind}" data-id="${esc(product)}">明細${(kind !== 'opening' || !can(permFor(kind))) ? '' : '／修改'}</button>`);
 const unitOf = r => esc(getUnit(r.product));
 const openingChip = r => `<span class="pill ${r.pool === 'stock' ? 'future' : 'other'} exp-chip" title="${esc(`入帳 ${r.entryDate}｜製作 ${r.manufactureDate}｜效期 ${expShow(r.expiryDate)}${r.note ? '｜' + r.note : ''}${r.by ? '｜' + r.by : ''}`)}"><span class="mono">${esc(r.batch)}</span> ${r.expiryDate === NO_EXPIRY ? '' : '效期 ' + esc(md(r.expiryDate)) + ' '}${esc(fmt(r.quantity))} ${unitOf(r)}</span>`;
 const prodKind = r => r.pool === 'stock' ? '生產轉現貨' : /當天生產/.test(r.note) ? '當天生產' : /半成品入庫/.test(r.note) ? '半成品入庫' : '';
@@ -479,44 +477,11 @@ function saveOpening(e) { e.preventDefault(); if (!can('produce')) return; act((
   else storeRecord({ id: uid(), type: 'opening', seq: nextSeq(), ...fields, ...stampNew() });
   resetOpening(); toast('期初庫存已儲存，其他工作表已同步更新');
 }); }
-function saveProduction(e) { e.preventDefault(); if (!can('produce')) return; act(() => {
-  const r = baseRow('p', 'pDate'); ensureProductSaved(r.name, r.unit, r.shelfDays);
-  const fields = { date: r.entryDate, product: r.name, batch: r.batch, manufactureDate: r.manufactureDate, expiryDate: r.expiryDate, quantity: r.quantity, note: r.note };
-  if (editProduction) { const old = data.movements.find(x => x.id === editProduction); if (!old) throw Error('這筆資料已被刪除，無法儲存修改'); storeRecord({ ...old, ...fields, ...stampEdit() }); }
-  else storeRecord({ id: uid(), type: 'production', seq: nextSeq(), ...fields, ...stampNew() });
-  resetProduction(); toast('生產量已儲存，並增加對應製作日期的庫存');
-}); }
-function previewForShipment() {
-  const box = $('shipmentPreview'); const date = $('sDate').value, product = clean($('sProduct').value), q = Number($('sQty').value);
-  if (!isDate(date) || !product || !Number.isFinite(q) || q <= 0) { box.textContent = '選擇產品並輸入數量，即可預覽最早效期庫存與可能的缺口。'; box.className = 'notice'; return; }
-  if (!getProduct(product)) { box.textContent = '此產品尚未建檔，請從清單選擇已建檔的產品（可輸入品號或品名搜尋）。'; box.className = 'notice warning'; return; }
-  const editing = editShipment ? data.movements.find(x => x.id === editShipment) : null;
-  const temp = { ...data, movements: data.movements.filter(x => x.id !== editShipment).concat([{ id: '__preview__', seq: editing ? editing.seq : Date.now(), type: 'shipment', date, product, quantity: q }]) };
-  const p = calculateLedger('9999-12-31', temp).shipments.get('__preview__'); if (!p) return;
-  const unit = getUnit(product); const details = p.allocations.map(a => a.expiryDate === NO_EXPIRY ? `期初現貨扣 ${fmt(a.quantity)}` : `${poolLabel(a.pool, date)} ${a.batch}（${a.manufactureDate} 製作／效期 ${a.expiryDate}）扣 ${fmt(a.quantity)}`).join('；');
-  box.className = `notice${p.shortage ? ' warning' : ''}`;
-  box.textContent = `預估可實際出貨 ${fmt(p.shipped)} ${unit}，缺口 ${fmt(p.shortage)} ${unit}。${details ? '預估扣批：' + details : '目前沒有可用的批次庫存。'}`;
-}
-function saveShipment(e) { e.preventDefault(); if (!can('ship')) return; act(() => {
-  const date = $('sDate').value, product = clean($('sProduct').value), quantity = inputPositive('sQty'), orderNo = clean($('sOrder').value), note = clean($('sNote').value);
-  if (!isDate(date) || !product) throw Error('請輸入出貨日期與產品');
-  if (!getProduct(product)) throw Error('此產品尚未建檔，請從清單選擇已建檔的產品');
-  let rec;
-  if (editShipment) { const old = data.movements.find(x => x.id === editShipment); if (!old) throw Error('這筆資料已被刪除，無法儲存修改'); rec = { ...old, date, product, quantity, orderNo, note, ...stampEdit() }; }
-  else rec = { id: uid(), type: 'shipment', seq: nextSeq(), date, product, quantity, orderNo, note, ...stampNew() };
-  const result = calculateLedger('9999-12-31', { ...data, movements: data.movements.filter(x => x.id !== rec.id).concat([rec]) }).shipments.get(rec.id);
-  storeRecord(rec); resetShipment();
-  toast(result.shortage ? `已登錄：實際分配 ${fmt(result.shipped)}，缺口 ${fmt(result.shortage)}` : `已登錄出貨 ${fmt(result.shipped)}，FEFO 扣批完成`, !!result.shortage);
-}); }
 function resetOpening() { $('openingForm').reset(); $('oMfg').value = TODAY(); $('oEntry').value = TODAY(); $('oUnit').value = '個'; $('oShelf').value = data.settings.defaultShelf; autoExpiry('o'); editOpening = null; $('openingFormTitle').textContent = '新增期初庫存'; $('oSubmit').textContent = '＋ 儲存期初庫存'; $('oCancel').classList.add('hide'); }
-function resetProduction() { $('productionForm').reset(); $('pDate').value = TODAY(); $('pMfg').value = TODAY(); $('pUnit').value = '個'; $('pShelf').value = data.settings.defaultShelf; autoExpiry('p'); editProduction = null; $('productionFormTitle').textContent = '新增每日生產資料'; $('pSubmit').textContent = '＋ 儲存生產紀錄'; $('pCancel').classList.add('hide'); }
-function resetShipment() { $('shipmentForm').reset(); $('sDate').value = TODAY(); editShipment = null; $('shipmentFormTitle').textContent = '新增每日出貨資料'; $('sSubmit').textContent = '＋ 儲存出貨紀錄'; $('sCancel').classList.add('hide'); previewForShipment(); }
-const resetForms = () => { resetOpening(); resetProduction(); resetShipment(); };
+const resetForms = () => resetOpening();
 const smooth = () => window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches ? 'auto' : 'smooth';
 function populateEdit(type, id) {
   if (type === 'opening') { const x = data.opening.find(x => x.id === id); if (!x) return; editOpening = id; for (const [f, v] of Object.entries({ oProduct: x.product, oUnit: getUnit(x.product), oBatch: x.batch, oQty: x.quantity, oMfg: x.manufactureDate, oEntry: x.entryDate, oExpiry: x.expiryDate, oNote: x.note || '' })) $(f).value = v; $('oShelf').value = getProduct(x.product)?.shelfDays ?? data.settings.defaultShelf; $('openingFormTitle').textContent = '修改期初庫存'; $('oSubmit').textContent = '儲存修改'; $('oCancel').classList.remove('hide'); go('opening'); setTimeout(() => $('openingForm').scrollIntoView({ block: 'center', behavior: smooth() }), 30); return; }
-  if (type === 'production') { const x = data.movements.find(x => x.id === id && x.type === 'production'); if (!x) return; editProduction = id; for (const [f, v] of Object.entries({ pProduct: x.product, pUnit: getUnit(x.product), pBatch: x.batch, pQty: x.quantity, pMfg: x.manufactureDate, pDate: x.date, pExpiry: x.expiryDate, pNote: x.note || '' })) $(f).value = v; $('pShelf').value = getProduct(x.product)?.shelfDays ?? data.settings.defaultShelf; $('productionFormTitle').textContent = '修改生產紀錄'; $('pSubmit').textContent = '儲存修改'; $('pCancel').classList.remove('hide'); go('production'); setTimeout(() => $('productionForm').scrollIntoView({ block: 'center', behavior: smooth() }), 30); return; }
-  const x = data.movements.find(x => x.id === id && x.type === 'shipment'); if (!x) return; editShipment = id; for (const [f, v] of Object.entries({ sDate: x.date, sProduct: x.product, sQty: x.quantity, sOrder: x.orderNo || '', sNote: x.note || '' })) $(f).value = v; $('shipmentFormTitle').textContent = '修改出貨紀錄'; $('sSubmit').textContent = '儲存修改'; $('sCancel').classList.remove('hide'); go('shipment'); previewForShipment(); setTimeout(() => $('shipmentForm').scrollIntoView({ block: 'center', behavior: smooth() }), 30);
 }
 
 /* ---------- 對話框 ---------- */
@@ -795,7 +760,7 @@ function renderPortal() {
     }
   }
   const rows = [...by.values()].sort((a, b) => cmp(b.date, a.date));
-  $('portalCount').textContent = rows.length ? `共 ${rows.length} 天。要看明細，到「出貨扣批明細」或「每日生產／出貨登錄」搜尋「入口網站」` : '入口網站帶入的生產與出貨紀錄，依日期彙總';
+  $('portalCount').textContent = rows.length ? `共 ${rows.length} 天。要看明細，到「出貨扣批明細」或「每日生產紀錄」「每日出貨紀錄」按「明細」` : '入口網站帶入的生產與出貨紀錄，依日期彙總';
   const n = v => `<td class="num">${v ? fmt(clampQty(v)) : '—'}</td>`;
   $('portalTable').innerHTML = table(['日期', '流程', '半成品入庫／當天生產#', '生產轉現貨#', '半成品轉現貨#', '實際揀貨#', '扣現貨#', '扣半成品#', '扣當天生產#', '出貨缺口#'], rows.map(g => `<tr>${tdm(g.date)}${td(isStockModeDay(g.date) ? badge('全現貨', 'due') : badge('半成品', 'other'))}${n(g.pQ)}${n(g.qQ)}${n(g.cQ)}${n(g.sQ)}${n(g.fromStock)}${n(g.fromSemi)}${n(g.fromToday)}<td class="num">${g.short ? badge(fmt(clampQty(g.short)), 'bad') : '—'}</td></tr>`), '還沒有從入口網站同步過');
 }
@@ -836,22 +801,19 @@ async function handleAction(el) {
   if (a === 'sync') return FEStore.syncNow();
   if (a.startsWith('csv-')) return exportCsv(a.slice(4));
   if (a === 'cancel-opening') return resetOpening();
-  if (a === 'cancel-production') return resetProduction();
-  if (a === 'cancel-shipment') return resetShipment();
   if (a === 'reload-users') return loadUsers();
   if (a === 'edit-user') { const u = (U.list || []).find(x => x.email === id); return u && openUserForm(u, true); }
   if (a === 'toggle-user') { const u = (U.list || []).find(x => x.email === id); return u && userCall('userSave', { email: u.email, name: u.name, pages: u.pages, enabled: !u.enabled }, u.enabled ? '已停用，這個人會馬上被登出' : '已啟用'); }
   if (a === 'delete-user') { const u = (U.list || []).find(x => x.email === id); if (!u || !await modal({ title: '刪除這位人員？', html: `<p>${esc(u.name || u.email)}（${esc(u.email)}）會馬上被登出，之後不能再登入。他登錄過的資料會保留。</p>`, ok: '刪除', danger: true })) return; return userCall('userDelete', { email: u.email }, '已刪除'); }
   if (a.startsWith('detail-')) return openDetail(a.slice(7), id);
-  if (a === 'edit-opening' || a === 'edit-production') { closeModal(); return can('produce') && populateEdit(a.slice(5), id); }
-  if (a === 'edit-shipment') { closeModal(); return can('ship') && populateEdit('shipment', id); }
+  if (a === 'edit-opening') { closeModal(); return can('produce') && populateEdit('opening', id); }
   if (a === 'edit-product') return editProduct(id);
   if (a.startsWith('delete-') && a !== 'delete-user') {
     closeModal();
     const typ = a.slice(7); if (!can(permFor(typ))) return;
     const rec = typ === 'opening' ? data.opening.find(x => x.id === id) : data.movements.find(x => x.id === id); if (!rec) return;
     if (!await modal({ title: '刪除這筆資料？', html: `<p>${esc(describeRec(rec))}</p><p class="modal-note">刪除後，所有庫存與歷史 FEFO 扣批會重新計算。</p>`, ok: '刪除', danger: true })) return;
-    return act(() => { FEStore.remove(kindOfRec(rec), rec.id); if (editOpening === id) resetOpening(); if (editProduction === id) resetProduction(); if (editShipment === id) resetShipment(); toast('已刪除，庫存及出貨分配已重算'); });
+    return act(() => { FEStore.remove(kindOfRec(rec), rec.id); if (editOpening === id) resetOpening(); toast('已刪除，庫存及出貨分配已重算'); });
   }
   if (a === 'demo') return seedDemo();
   if (a === 'import') return isAdmin() && $('importFile').click();
@@ -869,11 +831,9 @@ function bind() {
   $('addUserBtn').addEventListener('click', () => openUserForm());
   for (const id of ['openingFilter', 'productionFilter', 'shipmentFilter', 'batchFilter', 'allocationFilter', 'productFilter', 'settingFilter', 'batchLive', 'productLive']) $(id).addEventListener('input', scheduleRender);
   $('batchSeg').addEventListener('click', e => { const b = e.target.closest('[data-bmode]'); if (!b) return; batchMode = b.dataset.bmode; scheduleRender(); });
-  $('openingForm').addEventListener('submit', saveOpening); $('productionForm').addEventListener('submit', saveProduction); $('shipmentForm').addEventListener('submit', saveShipment);
+  $('openingForm').addEventListener('submit', saveOpening);
   $('settingsForm').addEventListener('submit', e => { e.preventDefault(); if (!can('setting')) return; const w = Number($('warnDays').value), s = Number($('defaultShelf').value); if (!Number.isInteger(w) || w < 1 || w > 3650 || !Number.isInteger(s) || s < 0 || s > 36500) { toast('請填寫有效的預警及保存天數（整數）', true); return; } act(() => { FEStore.save('settings', { id: 'main', warnDays: w, defaultShelf: s }); toast('系統設定已儲存'); }); });
-  for (const p of ['o', 'p']) { for (const id of [`${p}Mfg`, `${p}Shelf`]) $(id).addEventListener('change', () => autoExpiry(p)); $(`${p}Product`).addEventListener('change', () => productDefaults(p)); }
-  $('pDate').addEventListener('change', () => { $('pMfg').value = $('pDate').value; autoExpiry('p'); });
-  for (const id of ['sDate', 'sProduct', 'sQty']) $(id).addEventListener('input', previewForShipment);
+  for (const id of ['oMfg', 'oShelf']) $(id).addEventListener('change', () => autoExpiry('o')); $('oProduct').addEventListener('change', () => productDefaults('o'));
   const bm = $('portalBm'); bm.setAttribute('href', portalBookmarklet());
   bm.addEventListener('click', e => { e.preventDefault(); toast('請把這顆按鈕「拖曳」到瀏覽器的書籤列，再到入口網站的頁面按書籤。'); });
   $('portalFromForm').addEventListener('submit', e => {

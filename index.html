@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
 <title>生產出貨庫存效期管理</title>
-<meta name="description" content="每日生產、出貨登錄，批次庫存與有效日期 FEFO 先到期先出管理">
+<meta name="description" content="每日生產、出貨紀錄（入口網站同步），批次庫存與有效日期 FEFO 先到期先出管理">
 <meta name="theme-color" content="#153b48">
 <meta name="application-name" content="庫存效期">
 <meta name="apple-mobile-web-app-capable" content="yes">
@@ -28,8 +28,8 @@
   <nav class="nav" aria-label="主要功能">
     <a class="nav-btn" href="#dashboard" data-view="dashboard"><span class="nav-ico" aria-hidden="true">◫</span>營運總覽</a>
     <a class="nav-btn" href="#opening" data-view="opening"><span class="nav-ico" aria-hidden="true">▣</span>期初庫存建檔</a>
-    <a class="nav-btn" href="#production" data-view="production"><span class="nav-ico" aria-hidden="true">▤</span>每日生產登錄</a>
-    <a class="nav-btn" href="#shipment" data-view="shipment"><span class="nav-ico" aria-hidden="true">⇧</span>每日出貨登錄</a>
+    <a class="nav-btn" href="#production" data-view="production"><span class="nav-ico" aria-hidden="true">▤</span>每日生產紀錄</a>
+    <a class="nav-btn" href="#shipment" data-view="shipment"><span class="nav-ico" aria-hidden="true">⇧</span>每日出貨紀錄</a>
     <a class="nav-btn need-portal" href="#portal" data-view="portal"><span class="nav-ico" aria-hidden="true">⟳</span>入口網站同步</a>
     <a class="nav-btn" href="#batches" data-view="batches"><span class="nav-ico" aria-hidden="true">▦</span>批次庫存與效期</a>
     <a class="nav-btn" href="#allocations" data-view="allocations"><span class="nav-ico" aria-hidden="true">≋</span>出貨扣批明細</a>
@@ -68,7 +68,7 @@
     <div id="shortageAlert" class="notice warning" hidden></div>
     <div class="panel-split">
       <div class="panel"><div class="panel-head"><div><h2>最近 7 天生產 / 出貨趨勢</h2><p>依入庫日與出貨日統計，出貨以實際分配量計算</p></div></div><div class="panel-body"><div id="trendChart" class="chart"></div><div class="chart-legend"><span><b class="lg-a"></b>生產量</span><span><b class="lg-b"></b>實際出貨量</span><span class="scale" id="chartScale"></span></div></div></div>
-      <div class="panel"><div class="panel-head"><div><h2>快速開始</h2><p>依序輸入，每張表單自動連動</p></div></div><div class="panel-body"><ol class="step-list"><li>於「期初庫存建檔」填入原始庫存、批號、製作日期與效期。</li><li>每日生產後新增入庫資料，庫存同步增加。</li><li>每日出貨只需輸入產品與數量，自動分配最早效期的存貨。</li><li>至「出貨扣批明細」查看實際扣除的製作日期與批號。</li></ol><hr class="separator"><div class="segment"><a class="btn ghost small need-produce" href="#opening" data-view="opening">建立期初庫存</a><a class="btn ghost small need-produce" href="#production" data-view="production">填寫今日生產</a><a class="btn ghost small need-ship" href="#shipment" data-view="shipment">登錄出貨</a></div></div></div>
+      <div class="panel"><div class="panel-head"><div><h2>快速開始</h2><p>依序輸入，每張表單自動連動</p></div></div><div class="panel-body"><ol class="step-list"><li>於「期初庫存建檔」填入原始庫存、批號、製作日期與效期。</li><li>每天在入口網站按「庫存效期」書籤，生產與出貨數字自動帶入。</li><li>出貨依流程自動扣現貨、半成品（最早效期先出）與當天生產。</li><li>至「出貨扣批明細」查看實際扣除的製作日期與批號。</li></ol><hr class="separator"><div class="segment"><a class="btn ghost small need-produce" href="#opening" data-view="opening">建立期初庫存</a><a class="btn ghost small need-portal" href="#portal" data-view="portal">入口網站同步</a></div></div></div>
     </div>
     <div class="panel"><div class="panel-head"><div><h2>庫存效期預警</h2><p>15 天內到期與已過期的庫存，每個品號一列、依品號排列；已過期庫存不再參與出貨</p></div><a class="btn small" href="#batches" data-view="batches">查看全部批次</a></div><div id="dashExpiry" class="table-scroll"></div></div>
     <div class="panel"><div class="panel-head"><div><h2>近期出貨</h2><p>顯示實際出貨、扣批結果與出貨缺口</p></div></div><div id="dashShipments" class="table-scroll"></div></div>
@@ -92,32 +92,14 @@
   </section>
 
   <section id="production" class="section">
-    <p class="section-intro">每日生產完成後登錄，商品會依入庫日期建立新庫存。同一批號有不同製作日期時，系統分別管理。</p>
-    <div class="panel form-area need-produce"><div class="panel-head"><div><h2 id="productionFormTitle">新增每日生產資料</h2><p>出貨時會把這裡的生產量與期初庫存一併納入先到期先出計算。</p></div></div><div class="panel-body"><form id="productionForm" class="form-grid" novalidate>
-      <div class="field"><label for="pDate">生產入庫日期 *</label><input id="pDate" type="date" required></div>
-      <div class="field"><label for="pProduct">產品名稱 *</label><input id="pProduct" list="productNames" required placeholder="輸入品號或品名" maxlength="80" autocomplete="off"></div>
-      <div class="field"><label for="pUnit">單位 *</label><input id="pUnit" required value="個" maxlength="12"></div>
-      <div class="field"><label for="pBatch">批號 *</label><input id="pBatch" required placeholder="例如：20261109" maxlength="60" autocomplete="off"></div>
-      <div class="field"><label for="pQty">本次生產數量 *</label><input id="pQty" type="number" inputmode="decimal" required step="0.001" min="0.001" placeholder="0"></div>
-      <div class="field"><label for="pMfg">製作日期 *</label><input id="pMfg" type="date" required></div>
-      <div class="field"><label for="pShelf">保存天數</label><input id="pShelf" type="number" inputmode="numeric" min="0" max="36500" step="1" value="30"></div>
-      <div class="field"><label for="pExpiry">有效日期 *</label><input id="pExpiry" type="date" required></div>
-      <div class="field span2"><label for="pNote">備註</label><input id="pNote" maxlength="180" placeholder="選填"></div>
-      <div class="field span2"><label class="spacer-label">&nbsp;</label><div class="form-actions"><button id="pSubmit" type="submit" class="btn primary">＋ 儲存生產紀錄</button><button type="button" class="btn hide" id="pCancel" data-action="cancel-production">取消編輯</button></div></div>
-    </form></div></div>
+    <p class="section-intro">每日生產不用自己填：在「入口網站同步」按書籤，就會帶入總表的半成品入庫、生產轉現貨與半成品轉現貨。這裡只看紀錄。</p>
+    <div class="notice need-portal">要更新數字，請到入口網站的物管駕駛艙按「庫存效期」書籤。<a class="btn small" href="#portal" data-view="portal">前往入口網站同步</a></div>
     <div class="panel"><div class="panel-head"><div><h2>每日生產紀錄</h2><p id="productionCount">0 筆資料</p></div><div class="toolbar"><input id="productionFilter" class="search" type="search" placeholder="搜尋日期／產品／批號" aria-label="搜尋生產紀錄"><button type="button" class="btn small" data-action="csv-production">匯出 CSV</button></div></div><div id="productionTable" class="table-scroll"></div></div>
   </section>
 
   <section id="shipment" class="section">
-    <p class="section-intro">只需輸入產品與需求出貨量，系統會依「出貨當日有效、已入庫、有餘量」的庫存，先扣最早到期者，不足再往下一個製作日期／批號扣除。</p>
-    <div class="panel form-area need-ship"><div class="panel-head"><div><h2 id="shipmentFormTitle">新增每日出貨資料</h2><p>系統不會扣除尚未入庫或已過期的存貨；不足量會另外列為出貨缺口。</p></div></div><div class="panel-body"><form id="shipmentForm" class="form-grid" novalidate>
-      <div class="field"><label for="sDate">出貨日期 *</label><input id="sDate" type="date" required></div>
-      <div class="field span2"><label for="sProduct">出貨產品 *</label><input id="sProduct" list="productNames" required placeholder="輸入品號或品名，從清單選擇" maxlength="80" autocomplete="off"></div>
-      <div class="field"><label for="sQty">需求出貨數量 *</label><input id="sQty" type="number" inputmode="decimal" required step="0.001" min="0.001" placeholder="0"></div>
-      <div class="field span2"><label for="sOrder">出貨單號／客戶</label><input id="sOrder" placeholder="選填，例如：SO-0001" maxlength="80"></div>
-      <div class="field span2"><label for="sNote">備註</label><input id="sNote" placeholder="選填" maxlength="180"></div>
-      <div class="field span4"><div id="shipmentPreview" class="notice">選擇產品並輸入數量，即可預覽最早效期庫存與可能的缺口。</div><div class="form-actions"><button id="sSubmit" type="submit" class="btn primary">＋ 儲存出貨紀錄</button><button id="sCancel" type="button" class="btn hide" data-action="cancel-shipment">取消編輯</button></div></div>
-    </form></div></div>
+    <p class="section-intro">每日出貨不用自己填：在「入口網站同步」按書籤，就會帶入總表的實際揀貨，系統自動依流程扣現貨、半成品（先到期先出）與當天生產，不夠的列為缺口。這裡只看紀錄。</p>
+    <div class="notice need-portal">要更新數字，請到入口網站的物管駕駛艙按「庫存效期」書籤。<a class="btn small" href="#portal" data-view="portal">前往入口網站同步</a></div>
     <div class="panel"><div class="panel-head"><div><h2>每日出貨紀錄</h2><p id="shipmentCount">0 筆資料</p></div><div class="toolbar"><input id="shipmentFilter" class="search" type="search" placeholder="搜尋日期／產品／出貨單" aria-label="搜尋出貨紀錄"><button type="button" class="btn small" data-action="csv-shipment">匯出 CSV</button></div></div><div id="shipmentTable" class="table-scroll"></div></div>
   </section>
 
