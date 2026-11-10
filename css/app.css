@@ -50,6 +50,11 @@ h1,h2,h3{text-wrap:balance}
 /* 權限：沒有權限的人看不到對應的按鈕與表單 */
 body:not(.can-produce) .need-produce,body:not(.can-ship) .need-ship,body:not(.can-setting) .need-setting,body:not(.is-admin) .need-admin,body:not(.can-portal) .need-portal{display:none!important}
 .bm-btn{margin:6px 0;cursor:grab}
+.seg{display:inline-flex;border:1px solid var(--line);border-radius:8px;overflow:hidden;background:var(--surface)}
+.seg button{border:0;background:transparent;padding:6px 11px;font-size:12px;font-weight:700;color:var(--muted);border-right:1px solid var(--line)}
+.seg button:last-child{border-right:0}
+.seg button:hover{background:var(--surface-hover);color:var(--ink-2)}
+.seg button.on{background:var(--accent);color:var(--on-accent)}
 .data-table td.exp-cell{white-space:normal;min-width:280px}
 .exp-chips{display:flex;flex-wrap:wrap;gap:6px}
 .exp-chip{font-weight:600}

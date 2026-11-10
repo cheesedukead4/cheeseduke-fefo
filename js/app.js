@@ -298,6 +298,11 @@ function renderShipments(ledger) {
   $('shipmentTable').innerHTML = table(['出貨日期', '產品', '出貨單號／客戶', '需求量#', '實際出貨#', '缺口', '扣貨批數#', '備註', '登錄人', ...manageCol('shipment')], rows.map(x => { const s = ledger.shipments.get(x.id) || { shipped: 0, shortage: x.quantity, allocations: [] }; return `<tr>${tdm(x.date)}${td(`<strong>${esc(x.product)}</strong>`)}${td(esc(x.orderNo || '—'))}<td class="num">${fmt(x.quantity)} ${esc(getUnit(x.product))}</td><td class="num">${fmt(s.shipped)}</td>${td(s.shortage ? badge(`${fmt(s.shortage)} 未配`, 'bad') : badge('足額', 'ok'))}<td class="num">${s.allocations.length}</td>${td(esc(x.note || '—'))}${tdWho(x)}${manageCell('shipment', x.id)}</tr>`; }), '尚未登錄出貨紀錄');
 }
 // 每個產品一列：同一個有效日期合在一起，不同有效日期分開列（顏色＝效期狀態）；逐批號的明細用「匯出 CSV」
+// 排列：品號開頭 CK（6吋）→ CC（4吋）→ CA（小小公爵）→ CS（方盒）→ CL（生巧），其他開頭（例如 KA）排在後面，同開頭內照品號
+const SORT_PREFIXES = ['CK', 'CC', 'CA', 'CS', 'CL'];
+const SOON_DAYS = 15;
+let batchMode = 'all';
+function prefixRank(name) { const px = String(name).split(/[-| ]/)[0].toUpperCase(), i = SORT_PREFIXES.indexOf(px); return i >= 0 ? i : SORT_PREFIXES.length; }
 function renderBatches(groups, today) {
   const split = !isStockModeDay(today), byP = new Map();
   for (const g of groups) {
@@ -309,13 +314,17 @@ function renderBatches(groups, today) {
     e[isStock ? 'stock' : 'semi'] = clampQty(e[isStock ? 'stock' : 'semi'] + g.remaining); e.total = clampQty(e.total + g.remaining); e.batches.add(g.batch);
     p[isStock ? 'stock' : 'semi'] = clampQty(p[isStock ? 'stock' : 'semi'] + g.remaining); p.total = clampQty(p.total + g.remaining);
   }
-  const list = [...byP.values()].map(p => { const exps = [...p.exps.values()].sort((a, b) => (a.expiry === NO_EXPIRY ? 0 : 1) - (b.expiry === NO_EXPIRY ? 0 : 1) || cmp(a.expiry, b.expiry)); const first = exps.find(e => e.expiry !== NO_EXPIRY) || exps[0]; return { ...p, exps, first: first ? first.expiry : '', expText: exps.map(e => e.expiry).join(' ') }; });
-  const base = $('batchLive').checked ? list.filter(p => p.total > 0) : list;
-  const rows = searchable(base, $('batchFilter').value, ['product', 'expText']).sort((a, b) => (a.total > 0 ? 0 : 1) - (b.total > 0 ? 0 : 1) || cmp(a.first || '9999', b.first || '9999') || cmp(a.product, b.product));
-  const nExp = list.reduce((s, p) => s + p.exps.length, 0);
-  $('batchCount').textContent = `目前有庫存的產品 ${list.filter(p => p.total > 0).length} 項、共 ${nExp} 個不同有效日期；最早到期的排最上面`;
+  // 篩選：全部｜15 天內到期（0～15 天，不含已過期）｜已過期；篩選時每列只顯示符合的有效日期
+  const inMode = e => batchMode === 'all' || (e.expiry !== NO_EXPIRY && (batchMode === 'soon' ? dayDiff(today, e.expiry) >= 0 && dayDiff(today, e.expiry) <= SOON_DAYS : dayDiff(today, e.expiry) < 0));
+  const list = [...byP.values()].map(p => { const all = [...p.exps.values()].sort((a, b) => (a.expiry === NO_EXPIRY ? 0 : 1) - (b.expiry === NO_EXPIRY ? 0 : 1) || cmp(a.expiry, b.expiry)); const exps = all.filter(inMode); const first = all.find(e => e.expiry !== NO_EXPIRY) || all[0]; return { ...p, exps, match: clampQty(exps.reduce((s, e) => s + e.total, 0)), first: first ? first.expiry : '', expText: all.map(e => e.expiry).join(' ') }; });
+  const base = batchMode !== 'all' ? list.filter(p => p.exps.length) : $('batchLive').checked ? list.filter(p => p.total > 0) : list;
+  const rows = searchable(base, $('batchFilter').value, ['product', 'expText']).sort((a, b) => (a.total > 0 ? 0 : 1) - (b.total > 0 ? 0 : 1) || prefixRank(a.product) - prefixRank(b.product) || cmp(a.product, b.product));
+  const nExp = list.reduce((s, p) => s + p.exps.length, 0), modeName = batchMode === 'soon' ? `${SOON_DAYS} 天內到期` : '已過期';
+  document.querySelectorAll('#batchSeg [data-bmode]').forEach(b => b.classList.toggle('on', b.dataset.bmode === batchMode));
+  $('batchCount').textContent = batchMode === 'all' ? `目前有庫存的產品 ${list.filter(p => p.total > 0).length} 項、共 ${nExp} 個不同有效日期；依品號 ${SORT_PREFIXES.join('、')} 排列` : `${modeName}：${base.length} 項產品、${nExp} 個有效日期，共 ${fmt(clampQty(base.reduce((s, p) => s + p.match, 0)))} 個；只顯示「${modeName}」的有效日期`;
   const chip = (e, unit) => { const s = expiryStatus(e.expiry, e.total, today); const part = split ? (e.stock && e.semi ? `（現貨 ${fmt(e.stock)}・半成品 ${fmt(e.semi)}）` : e.stock ? '（現貨）' : '（半成品）') : ''; return `<span class="pill ${s.cls} exp-chip" title="${esc(`${expShow(e.expiry)}｜${s.label}｜批號 ${[...e.batches].join('、')}`)}"><span class="mono">${esc(expShow(e.expiry) === '—' ? '期初現貨' : expShow(e.expiry))}</span> ${esc(fmt(e.total))} ${esc(unit)}${esc(part)}</span>`; };
-  $('batchTable').innerHTML = table(['產品', '各有效日期的數量（由早到晚，顏色＝效期狀態）', '剩餘庫存#', ...(split ? ['現貨#', '半成品#'] : []), '最早效期狀態'], rows.map(p => { const s = p.total > 0 ? expiryStatus(p.first || NO_EXPIRY, p.total, today) : { label: '已用完', cls: 'other' }; return `<tr>${td(`<strong>${esc(p.product)}</strong>`)}<td class="exp-cell"><div class="exp-chips">${p.exps.map(e => chip(e, p.unit)).join('') || '<span class="who">—</span>'}</div></td><td class="num">${fmt(p.total)} ${esc(p.unit)}</td>${split ? `<td class="num">${p.stock ? fmt(p.stock) : '—'}</td><td class="num">${p.semi ? fmt(p.semi) : '—'}</td>` : ''}${td(badge(s.label, s.cls))}</tr>`; }), '尚無批次庫存紀錄');
+  const filtered = batchMode !== 'all';
+  $('batchTable').innerHTML = table(['產品', filtered ? `${modeName}的有效日期與數量` : '各有效日期的數量（由早到晚，顏色＝效期狀態）', ...(filtered ? [`${modeName}數量#`] : []), '剩餘庫存#', ...(split ? ['現貨#', '半成品#'] : []), '最早效期狀態'], rows.map(p => { const s = p.total > 0 ? expiryStatus(p.first || NO_EXPIRY, p.total, today) : { label: '已用完', cls: 'other' }; return `<tr>${td(`<strong>${esc(p.product)}</strong>`)}<td class="exp-cell"><div class="exp-chips">${p.exps.map(e => chip(e, p.unit)).join('') || '<span class="who">—</span>'}</div></td>${filtered ? `<td class="num">${fmt(p.match)} ${esc(p.unit)}</td>` : ''}<td class="num">${fmt(p.total)} ${esc(p.unit)}</td>${split ? `<td class="num">${p.stock ? fmt(p.stock) : '—'}</td><td class="num">${p.semi ? fmt(p.semi) : '—'}</td>` : ''}${td(badge(s.label, s.cls))}</tr>`; }), batchMode === 'soon' ? `目前沒有 ${SOON_DAYS} 天內到期的庫存` : batchMode === 'expired' ? '目前沒有已過期的庫存' : '尚無批次庫存紀錄');
 }
 function allocationRows(ledger) { const rows = []; for (const sh of [...data.movements.filter(x => x.type === 'shipment')].sort((a, b) => cmp(b.date, a.date) || b.seq - a.seq)) { const r = ledger.shipments.get(sh.id); if (!r) continue; for (const a of r.allocations) rows.push({ date: sh.date, orderNo: sh.orderNo || '', product: sh.product, batch: a.batch, pool: poolLabel(a.pool, sh.date), manufactureDate: a.manufactureDate, expiryDate: a.expiryDate, quantity: a.quantity, unit: getUnit(sh.product), kind: 'allocated' }); if (r.shortage) rows.push({ date: sh.date, orderNo: sh.orderNo || '', product: sh.product, batch: '未分配', manufactureDate: '', expiryDate: '', quantity: r.shortage, unit: getUnit(sh.product), kind: 'shortage' }); } return rows; }
 function renderAllocations(ledger) {
@@ -770,6 +779,7 @@ function bind() {
   $('logoutBtn2').addEventListener('click', () => FEAuth.logout());
   $('addUserBtn').addEventListener('click', () => openUserForm());
   for (const id of ['openingFilter', 'productionFilter', 'shipmentFilter', 'batchFilter', 'allocationFilter', 'productFilter', 'settingFilter', 'batchLive', 'productLive']) $(id).addEventListener('input', scheduleRender);
+  $('batchSeg').addEventListener('click', e => { const b = e.target.closest('[data-bmode]'); if (!b) return; batchMode = b.dataset.bmode; scheduleRender(); });
   $('openingForm').addEventListener('submit', saveOpening); $('productionForm').addEventListener('submit', saveProduction); $('shipmentForm').addEventListener('submit', saveShipment);
   $('settingsForm').addEventListener('submit', e => { e.preventDefault(); if (!can('setting')) return; const w = Number($('warnDays').value), s = Number($('defaultShelf').value); if (!Number.isInteger(w) || w < 1 || w > 3650 || !Number.isInteger(s) || s < 0 || s > 36500) { toast('請填寫有效的預警及保存天數（整數）', true); return; } act(() => { FEStore.save('settings', { id: 'main', warnDays: w, defaultShelf: s }); toast('系統設定已儲存'); }); });
   for (const p of ['o', 'p']) { for (const id of [`${p}Mfg`, `${p}Shelf`]) $(id).addEventListener('change', () => autoExpiry(p)); $(`${p}Product`).addEventListener('change', () => productDefaults(p)); }
