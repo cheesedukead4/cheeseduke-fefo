@@ -178,8 +178,10 @@ function calculateLedger(asOf = '9999-12-31', st = data) {
       continue;
     }
     const eligible = (byProduct.get(x.product) || []).filter(l => l.remaining > 1e-7 && l.expiryDate >= e.date && l.manufactureDate <= e.date && l.entryDate <= e.date);
-    // 先扣現貨（pool = stock），不夠再照效期扣半成品（FEFO）
-    eligible.sort((a, b) => (a.pool === 'stock' ? 0 : 1) - (b.pool === 'stock' ? 0 : 1) || cmp(a.expiryDate, b.expiryDate) || cmp(a.manufactureDate, b.manufactureDate) || cmp(a.entryDate, b.entryDate) || a.seq - b.seq || cmp(a.id, b.id));
+    // 出貨順序（照實際流程）：①現貨 ②半成品（轉現貨，效期最早的先）③當天的生產轉現貨
+    //   ④當天的半成品入庫＝出完貨剩下的，前面都不夠時才當最後備用（手動登錄的當天生產也在這裡）
+    const rank = l => (l.source === 'opening' || l.entryDate < e.date) ? (l.pool === 'stock' ? 0 : 1) : (l.pool === 'stock' ? 2 : 3);
+    eligible.sort((a, b) => rank(a) - rank(b) || cmp(a.expiryDate, b.expiryDate) || cmp(a.manufactureDate, b.manufactureDate) || cmp(a.entryDate, b.entryDate) || a.seq - b.seq || cmp(a.id, b.id));
     const required = Number(x.quantity); let remaining = required; const allocations = [];
     for (const lot of eligible) { if (remaining <= 1e-7) break; const amount = clampQty(Math.min(remaining, lot.remaining)); lot.remaining = clampQty(lot.remaining - amount); lot.used = clampQty(lot.used + amount); remaining = clampQty(remaining - amount); allocations.push({ lotId: lot.id, product: lot.product, batch: lot.batch, manufactureDate: lot.manufactureDate, expiryDate: lot.expiryDate, quantity: amount }); }
     shipments.set(x.id, { required, shipped: clampQty(required - remaining), shortage: clampQty(remaining), allocations });
@@ -285,7 +287,9 @@ function renderAllocations(ledger) {
 function renderProducts(products) {
   const base = $('productLive').checked ? products.filter(x => x.usable > 0 || x.expired > 0) : products;
   const rows = searchable(base, $('productFilter').value, ['name']);
-  $('productTable').innerHTML = table(['產品名稱', '單位', '期初入庫#', '累計生產#', '累計扣貨#', '可用庫存#', '現貨#', '半成品#', '已過期量#', '近效期量#', '最近有效日期', '安全庫存狀態'], rows.map(x => { const st = x.lowStock && x.usable < x.lowStock ? badge(`低於 ${fmt(x.lowStock)}`, 'bad') : x.lowStock ? badge('正常', 'ok') : badge('未設定', 'other'); return `<tr>${td(`<strong>${esc(x.name)}</strong>`)}${td(esc(x.unit))}<td class="num">${fmt(x.opened)}</td><td class="num">${fmt(x.produced)}</td><td class="num">${fmt(x.used)}</td><td class="num">${fmt(x.usable)}</td><td class="num">${fmt(x.stock)}</td><td class="num">${fmt(x.semi)}</td><td class="num">${fmt(x.expired)}</td><td class="num">${fmt(x.warning)}</td>${tdm(x.oldest)}${td(st)}</tr>`; }), '尚無產品，請先建立期初庫存或生產紀錄');
+  // 半成品模式分開列現貨（無效期）與半成品；全現貨模式全部都是現貨，不分欄
+  const split = !isStockModeDay(TODAY());
+  $('productTable').innerHTML = table(['產品名稱', '單位', '期初入庫#', '累計生產#', '累計扣貨#', split ? '可用庫存#' : '可用庫存（現貨）#', ...(split ? ['現貨#', '半成品#'] : []), '已過期量#', '近效期量#', '最近有效日期', '安全庫存狀態'], rows.map(x => { const st = x.lowStock && x.usable < x.lowStock ? badge(`低於 ${fmt(x.lowStock)}`, 'bad') : x.lowStock ? badge('正常', 'ok') : badge('未設定', 'other'); return `<tr>${td(`<strong>${esc(x.name)}</strong>`)}${td(esc(x.unit))}<td class="num">${fmt(x.opened)}</td><td class="num">${fmt(x.produced)}</td><td class="num">${fmt(x.used)}</td><td class="num">${fmt(x.usable)}</td>${split ? `<td class="num">${fmt(x.stock)}</td><td class="num">${fmt(x.semi)}</td>` : ''}<td class="num">${fmt(x.expired)}</td><td class="num">${fmt(x.warning)}</td>${tdm(x.oldest)}${td(st)}</tr>`; }), '尚無產品，請先建立期初庫存或生產紀錄');
 }
 function renderSettings() {
   for (const [id, v] of [['warnDays', data.settings.warnDays], ['defaultShelf', data.settings.defaultShelf]]) { const el = $(id); if (document.activeElement !== el) el.value = v; }
@@ -361,7 +365,7 @@ function previewForShipment() {
   const editing = editShipment ? data.movements.find(x => x.id === editShipment) : null;
   const temp = { ...data, movements: data.movements.filter(x => x.id !== editShipment).concat([{ id: '__preview__', seq: editing ? editing.seq : Date.now(), type: 'shipment', date, product, quantity: q }]) };
   const p = calculateLedger('9999-12-31', temp).shipments.get('__preview__'); if (!p) return;
-  const unit = getUnit(product); const details = p.allocations.map(a => a.expiryDate === NO_EXPIRY ? `現貨扣 ${fmt(a.quantity)}` : `${a.batch}（${a.manufactureDate} 製作／效期 ${a.expiryDate}）扣 ${fmt(a.quantity)}`).join('；');
+  const unit = getUnit(product); const details = p.allocations.map(a => a.expiryDate === NO_EXPIRY ? `${a.batch === '生產轉現貨' ? '當天生產轉現貨' : '現貨'}扣 ${fmt(a.quantity)}` :`${a.batch}（${a.manufactureDate} 製作／效期 ${a.expiryDate}）扣 ${fmt(a.quantity)}`).join('；');
   box.className = `notice${p.shortage ? ' warning' : ''}`;
   box.textContent = `預估可實際出貨 ${fmt(p.shipped)} ${unit}，缺口 ${fmt(p.shortage)} ${unit}。${details ? '預估扣批：' + details : '目前沒有可用的批次庫存。'}`;
 }
@@ -471,6 +475,11 @@ const DEFAULT_PREFIXES = ['CK', 'CC', 'CA', 'CL', 'CS', 'KA'];
 const parsePrefixes = s => [...new Set(String(s || '').toUpperCase().split(/[\s,，、;；]+/).map(x => x.trim()).filter(x => /^[A-Z0-9]{1,10}$/.test(x)))];
 const portalPrefixes = () => { const p = portalMeta().prefixes; return Array.isArray(p) && p.length ? p : DEFAULT_PREFIXES; };
 const codePrefix = code => String(code).split(/[-|]/)[0].toUpperCase();
+// 兩種流程，依「改用全現貨模式的日期」（settings 'portal'.stockFrom）切換，每一天各自套用：
+//   半成品模式：半成品入庫＝有效期批次、生產轉現貨＝當天現貨（無效期）；出貨 ①現貨 ②半成品（FEFO）③當天生產轉現貨
+//   全現貨模式：當天生產（半成品入庫＋生產轉現貨）＝一個有效期的現貨批次；出貨 ①既有現貨（FEFO）②當天生產，剩下的就是現貨入庫
+const stockFromDate = () => isDate(portalMeta().stockFrom) ? portalMeta().stockFrom : '';
+const isStockModeDay = d => { const s = stockFromDate(); return !!s && d >= s; };
 const productCodeOf = name => { const s = clean(name), i = s.indexOf(' '); return i > 0 ? s.slice(0, i) : s; };
 function decodeB64url(s) { s = s.replace(/-/g, '+').replace(/_/g, '/'); while (s.length % 4) s += '='; return JSON.parse(decodeURIComponent(escape(atob(s)))); }
 // 書籤資料整理乾淨：{ v:2, t: 書籤當天, d: { 日期: [[品號, 品名, 半成品入庫, 實際揀貨, 期初現貨, 生產轉現貨], ...] }, w: 讀取失敗的日期說明 }
@@ -534,20 +543,39 @@ function applyPortalPending() {
       }
       for (const id of oldOpen.keys()) if (!wantOpen.has(id)) openRemoves.push(id);
     }
+    let modeB = 0;
     for (const ds of dates) {
-      const want = new Set();
+      const want = new Set(), stockMode = isStockModeDay(ds);
+      if (stockMode) modeB++;
       for (const r of c.days[ds]) {
+        if (stockMode) {
+          // 全現貨模式：當天生產＝半成品入庫＋生產轉現貨，一個有效期的現貨批次
+          const q = clampQty(r.inQ + r.toStock);
+          if (okP && q > 0) {
+            const p = productFor(r.code, r.name), id = `pt-p-${ds}-${r.code}`, old = existing.get(id);
+            want.add(id); sum.pN++; sum.pQ += q;
+            const rec = old ? { ...old, product: p.name, quantity: q, note: '入口網站：當天生產（全現貨模式）' } : { id, type: 'production', seq: nextSeq(), date: ds, product: p.name, batch: ds.replace(/-/g, ''), manufactureDate: ds, expiryDate: addDays(ds, p.shelfDays), quantity: q, note: '入口網站：當天生產（全現貨模式）', by: who, at };
+            if (!old || old.quantity !== rec.quantity || old.product !== rec.product || old.note !== rec.note) saves.push(rec);
+          }
+          if (okS && r.outQ > 0) {
+            const p = productFor(r.code, r.name), id = `pt-s-${ds}-${r.code}`, old = existing.get(id);
+            want.add(id); sum.sN++; sum.sQ += r.outQ;
+            const rec = old ? { ...old, product: p.name, quantity: r.outQ } : { id, type: 'shipment', seq: nextSeq(), date: ds, product: p.name, quantity: r.outQ, orderNo: '入口網站：實際揀貨', note: '', by: who, at };
+            if (!old || old.quantity !== rec.quantity || old.product !== rec.product) saves.push(rec);
+          }
+          continue;
+        }
         if (c.hasStock && okP && r.toStock > 0) {
           const p = productFor(r.code, r.name), id = `pt-q-${ds}-${r.code}`, old = existing.get(id);
           want.add(id); sum.qN++; sum.qQ += r.toStock;
-          const rec = old ? { ...old, product: p.name, quantity: r.toStock } : { id, type: 'production', pool: 'stock', seq: nextSeq(), date: ds, product: p.name, batch: '現貨', manufactureDate: ds, expiryDate: NO_EXPIRY, quantity: r.toStock, note: '入口網站：生產轉現貨', by: who, at };
-          if (!old || old.quantity !== rec.quantity || old.product !== rec.product) saves.push(rec);
+          const rec = old ? { ...old, product: p.name, quantity: r.toStock, batch: '生產轉現貨' } : { id, type: 'production', pool: 'stock', seq: nextSeq(), date: ds, product: p.name, batch: '生產轉現貨', manufactureDate: ds, expiryDate: NO_EXPIRY, quantity: r.toStock, note: '入口網站：生產轉現貨', by: who, at };
+          if (!old || old.quantity !== rec.quantity || old.product !== rec.product || old.batch !== rec.batch) saves.push(rec);
         }
         if (okP && r.inQ > 0) {
           const p = productFor(r.code, r.name), id = `pt-p-${ds}-${r.code}`, old = existing.get(id);
           want.add(id); sum.pN++; sum.pQ += r.inQ;
-          const rec = old ? { ...old, product: p.name, quantity: r.inQ } : { id, type: 'production', seq: nextSeq(), date: ds, product: p.name, batch: ds.replace(/-/g, ''), manufactureDate: ds, expiryDate: addDays(ds, p.shelfDays), quantity: r.inQ, note: '入口網站：半成品入庫', by: who, at };
-          if (!old || old.quantity !== rec.quantity || old.product !== rec.product) saves.push(rec);
+          const rec = old ? { ...old, product: p.name, quantity: r.inQ, note: '入口網站：半成品入庫' } : { id, type: 'production', seq: nextSeq(), date: ds, product: p.name, batch: ds.replace(/-/g, ''), manufactureDate: ds, expiryDate: addDays(ds, p.shelfDays), quantity: r.inQ, note: '入口網站：半成品入庫', by: who, at };
+          if (!old || old.quantity !== rec.quantity || old.product !== rec.product || old.note !== rec.note) saves.push(rec);
         }
         if (okS && r.outQ > 0) {
           const p = productFor(r.code, r.name), id = `pt-s-${ds}-${r.code}`, old = existing.get(id);
@@ -566,8 +594,8 @@ function applyPortalPending() {
     const meta = portalMeta(), changed = saves.length + removes.length + openSaves.length + openRemoves.length;
     FEStore.save('settings', { ...meta, id: 'portal', at: Date.now(), by: who, first: dates[0] || '', last: dates[dates.length - 1] || '', days: dates.length, ...sum, pQ: clampQty(sum.pQ), sQ: clampQty(sum.sQ), qQ: clampQty(sum.qQ), ...(stockOpen.set ? { stockOpenDate: from, stockOpenN: stockOpen.n, stockOpenQ: clampQty(stockOpen.q) } : {}), newProducts: newProducts.length, changed, warn: c.warn });
     const range = dates.length ? `${shortDate(dates[0])}～${shortDate(dates[dates.length - 1])}` : '沒有可匯入的日期';
-    const parts = [okP ? `半成品入庫 ${sum.pN} 筆（${fmt(sum.pQ)} 個）` : '', okP && c.hasStock && sum.qN ? `生產轉現貨 ${sum.qN} 筆（${fmt(sum.qQ)} 個）` : '', okS ? `出貨 ${sum.sN} 筆（${fmt(sum.sQ)} 個）` : ''].filter(Boolean).join('、');
-    const notes = [stockOpen.set ? `期初現貨 ${stockOpen.n} 個品號（${fmt(stockOpen.q)} 個，${from}）` : '', !c.hasStock ? '這是舊版書籤，沒有帶入現貨，請到「入口網站同步」重新拖曳書籤' : '', newProducts.length ? `新增產品 ${newProducts.length} 項` : '', skippedCodes.size ? `略過 ${prefixes.join('、')} 以外的品號 ${skippedCodes.size} 個` : '', before.length ? `起算日 ${from} 以前的 ${before.length} 天沒有匯入` : '', !okP ? '你沒有生產權限，生產數字沒有存' : '', !okS ? '你沒有出貨權限，出貨數字沒有存' : '', c.warn ? '注意：' + c.warn : ''].filter(Boolean).join('；');
+    const parts = [okP ? `${modeB === dates.length && dates.length ? '當天生產' : modeB ? '半成品入庫／當天生產' : '半成品入庫'} ${sum.pN} 筆（${fmt(sum.pQ)} 個）` : '', okP && c.hasStock && sum.qN ? `生產轉現貨 ${sum.qN} 筆（${fmt(sum.qQ)} 個）` : '', okS ? `出貨 ${sum.sN} 筆（${fmt(sum.sQ)} 個）` : ''].filter(Boolean).join('、');
+    const notes = [modeB ? `${modeB === dates.length ? '全部' : `其中 ${modeB} 天`}用全現貨模式（${stockFromDate()} 起）` : '', stockOpen.set ? `期初現貨 ${stockOpen.n} 個品號（${fmt(stockOpen.q)} 個，${from}）` : '', !c.hasStock ? '這是舊版書籤，沒有帶入現貨，請到「入口網站同步」重新拖曳書籤' : '', newProducts.length ? `新增產品 ${newProducts.length} 項` : '', skippedCodes.size ? `略過 ${prefixes.join('、')} 以外的品號 ${skippedCodes.size} 個` : '', before.length ? `起算日 ${from} 以前的 ${before.length} 天沒有匯入` : '', !okP ? '你沒有生產權限，生產數字沒有存' : '', !okS ? '你沒有出貨權限，出貨數字沒有存' : '', c.warn ? '注意：' + c.warn : ''].filter(Boolean).join('；');
     toast(`已同步入口網站 ${range}：${parts}${changed ? '' : '（數字都沒變）'}${notes ? '。' + notes : ''}`, false, 10000);
     go('portal');
   } catch (e) { toast('入口網站資料讀取失敗：' + e.message, true, 8000); }
@@ -589,30 +617,42 @@ function portalBookmarklet() {
     "ov.textContent='讀取完成，正在開啟庫存效期 App…';location.href='" + app + "#portal='+s}catch(e){ov.remove();alert('讀取入口網站失敗：'+e.message+'\\n\\n請確認已經登入入口網站，並在入口網站的頁面（例如物管駕駛艙總表）按這個書籤')}})()";
   return 'javascript:' + encodeURIComponent(code);
 }
+const FLOW_SEMI = '<strong>半成品模式</strong>：<strong>半成品入庫</strong>登錄成有效期的半成品批次；起算日的<strong>期初現貨</strong>與每天的<strong>生產轉現貨</strong>登錄成現貨（沒有效期）；<strong>實際揀貨</strong>登錄成出貨，照實際流程扣：<strong>①現貨 → ②半成品（轉現貨，效期最早的先）→ ③當天的生產轉現貨</strong>，當天的半成品入庫是出完貨剩下的。';
+const FLOW_STOCK = '<strong>全現貨模式</strong>：沒有半成品，<strong>當天生產</strong>（總表的半成品入庫＋生產轉現貨）登錄成有效期的現貨批次；<strong>實際揀貨</strong>登錄成出貨：<strong>①既有現貨（效期最早的先）→ ②不夠再從當天生產直接取</strong>，剩下的就是現貨入庫。';
 function renderPortal() {
-  const m = portalMeta(), from = syncFromDate();
+  const m = portalMeta(), from = syncFromDate(), sf = stockFromDate(), nowB = isStockModeDay(TODAY());
+  $('portalFlow').innerHTML = `從入口網站（物管駕駛艙「總表」）帶入每日數字。${nowB ? FLOW_STOCK : FLOW_SEMI}${sf ? (nowB ? `（${sf} 以前的日期仍用半成品模式）` : `<br>${sf} 起改用${FLOW_STOCK}`) : ''}<br>`;
   $('portalKpis').innerHTML = [
     ['上次同步', m.at ? new Date(m.at).toLocaleString('zh-TW', { month: 'numeric', day: 'numeric', hour: '2-digit', minute: '2-digit' }) : '還沒同步過', m.by || '', m.at ? '' : 'warn'],
-    ['同步的日期', m.last ? `${shortDate(m.first)}～${shortDate(m.last)}` : '—', m.days ? `${m.days} 天` : '', ''],
+    ['目前流程', nowB ? '全現貨模式' : '半成品模式', sf ? (nowB ? `${sf} 起` : `${sf} 起改全現貨`) : '尚未設定切換日期', nowB ? 'warn' : ''],
     ['期初現貨', m.stockOpenDate ? `${fmt(m.stockOpenQ)} 個` : '還沒帶入', m.stockOpenDate ? `${m.stockOpenN} 個品號（${m.stockOpenDate}）` : '用新版書籤同步一次就會帶入', m.stockOpenDate ? '' : 'warn'],
-    ['起算日', from || '不限', isDate(m.syncFrom) ? '手動設定' : '期初庫存入帳日的隔天', ''],
+    ['起算日', from || '不限', m.last ? `上次同步 ${shortDate(m.first)}～${shortDate(m.last)}` : (isDate(m.syncFrom) ? '手動設定' : '期初庫存入帳日的隔天'), ''],
   ].map(([l, v, d, c]) => `<article class="kpi ${c}"><div class="kpi-label">${esc(l)}</div><div class="kpi-value" style="font-size:20px">${esc(v)}</div><div class="kpi-desc">${esc(d)}</div></article>`).join('');
   const fEl = $('portalFrom'); if (document.activeElement !== fEl) fEl.value = from || '';
+  const sEl = $('portalStockFrom'); if (document.activeElement !== sEl) sEl.value = sf;
   const pEl = $('portalPrefixes'); if (document.activeElement !== pEl) pEl.value = portalPrefixes().join(', ');
   $('portalPrefixText').textContent = portalPrefixes().join('、');
   $('portalFromHint').textContent = isDate(m.syncFrom) ? '' : '目前用預設：期初庫存最晚入帳日的隔天';
   const ledger = calculateLedger(), by = new Map();
   for (const r of data.movements) {
     if (!r.id.startsWith('pt-')) continue;
-    if (!by.has(r.date)) by.set(r.date, { date: r.date, pQ: 0, qQ: 0, sQ: 0, fromStock: 0, fromSemi: 0, short: 0 });
-    const g = by.get(r.date);
+    if (!by.has(r.date)) by.set(r.date, { date: r.date, pQ: 0, qQ: 0, sQ: 0, fromStock: 0, fromSemi: 0, fromToday: 0, short: 0 });
+    const g = by.get(r.date), B = isStockModeDay(r.date);
     if (r.type === 'production') { if (r.pool === 'stock') g.qQ += r.quantity; else g.pQ += r.quantity; }
-    else { const s = ledger.shipments.get(r.id); g.sQ += r.quantity; g.short += s?.shortage || 0; for (const a of s?.allocations || []) { if (a.expiryDate === NO_EXPIRY) g.fromStock += a.quantity; else g.fromSemi += a.quantity; } }
+    else {
+      // 扣現貨＝之前就有的現貨（全現貨模式含有效期批次）；扣半成品＝之前的半成品（只在半成品模式）；扣當天生產＝當天生產轉現貨／當天生產
+      const s = ledger.shipments.get(r.id); g.sQ += r.quantity; g.short += s?.shortage || 0;
+      for (const a of s?.allocations || []) {
+        if (a.manufactureDate === r.date && /^pt-[pq]-/.test(String(a.lotId))) g.fromToday += a.quantity;
+        else if (a.expiryDate === NO_EXPIRY || B) g.fromStock += a.quantity;
+        else g.fromSemi += a.quantity;
+      }
+    }
   }
   const rows = [...by.values()].sort((a, b) => cmp(b.date, a.date));
-  $('portalCount').textContent = rows.length ? `共 ${rows.length} 天；出貨先扣現貨，不夠才照效期扣半成品。要看明細，到「出貨扣批明細」或「每日生產／出貨登錄」搜尋「入口網站」` : '入口網站帶入的生產與出貨紀錄，依日期彙總';
+  $('portalCount').textContent = rows.length ? `共 ${rows.length} 天。要看明細，到「出貨扣批明細」或「每日生產／出貨登錄」搜尋「入口網站」` : '入口網站帶入的生產與出貨紀錄，依日期彙總';
   const n = v => `<td class="num">${v ? fmt(clampQty(v)) : '—'}</td>`;
-  $('portalTable').innerHTML = table(['日期', '半成品入庫#', '生產轉現貨#', '實際揀貨#', '扣現貨#', '扣半成品#', '出貨缺口#'], rows.map(g => `<tr>${tdm(g.date)}${n(g.pQ)}${n(g.qQ)}${n(g.sQ)}${n(g.fromStock)}${n(g.fromSemi)}<td class="num">${g.short ? badge(fmt(clampQty(g.short)), 'bad') : '—'}</td></tr>`), '還沒有從入口網站同步過');
+  $('portalTable').innerHTML = table(['日期', '流程', '半成品入庫／當天生產#', '生產轉現貨#', '實際揀貨#', '扣現貨#', '扣半成品#', '扣當天生產#', '出貨缺口#'], rows.map(g => `<tr>${tdm(g.date)}${td(isStockModeDay(g.date) ? badge('全現貨', 'due') : badge('半成品', 'other'))}${n(g.pQ)}${n(g.qQ)}${n(g.sQ)}${n(g.fromStock)}${n(g.fromSemi)}${n(g.fromToday)}<td class="num">${g.short ? badge(fmt(clampQty(g.short)), 'bad') : '—'}</td></tr>`), '還沒有從入口網站同步過');
 }
 
 /* ---------- 人員與權限（管理員）---------- */
@@ -690,10 +730,10 @@ function bind() {
   bm.addEventListener('click', e => { e.preventDefault(); toast('請把這顆按鈕「拖曳」到瀏覽器的書籤列，再到入口網站的頁面按書籤。'); });
   $('portalFromForm').addEventListener('submit', e => {
     e.preventDefault(); if (!can('setting')) return;
-    const v = $('portalFrom').value, px = parsePrefixes($('portalPrefixes').value);
-    if (v && !isDate(v)) { toast('請選擇有效的日期', true); return; }
+    const v = $('portalFrom').value, sf = $('portalStockFrom').value, px = parsePrefixes($('portalPrefixes').value);
+    if ((v && !isDate(v)) || (sf && !isDate(sf))) { toast('請選擇有效的日期', true); return; }
     if (!px.length) { toast('請至少填一個品號開頭，例如 CK', true); return; }
-    act(() => { FEStore.save('settings', { ...portalMeta(), id: 'portal', syncFrom: v || '', prefixes: px }); toast(`同步設定已儲存：起算日 ${v || '預設（' + (defaultSyncFrom() || '不限') + '）'}，品號開頭 ${px.join('、')}。下次同步生效`); });
+    act(() => { FEStore.save('settings', { ...portalMeta(), id: 'portal', syncFrom: v || '', stockFrom: sf || '', prefixes: px }); toast(`同步設定已儲存：起算日 ${v || '預設（' + (defaultSyncFrom() || '不限') + '）'}，${sf ? `${sf} 起用全現貨模式` : '繼續用半成品模式'}，品號開頭 ${px.join('、')}。已經同步過的日期，下次同步會照新設定重算`); });
   });
   $('importFile').addEventListener('change', async e => {
     const file = e.target.files && e.target.files[0]; e.target.value = ''; if (!file || !isAdmin()) return;
