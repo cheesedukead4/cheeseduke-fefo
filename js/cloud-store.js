@@ -436,6 +436,8 @@
     var meta = all.meta || {};
     Object.assign(vers, meta.vers || {});
     (meta.dirty || []).forEach(function (k) { dirty.add(k); });
+    // 讀本機資料之前畫面可能已經呼叫過 list()，把那時算出的空結果清掉
+    Object.keys(cache).forEach(function (k) { delete cache[k]; });
     return window.FEAuth ? FEAuth.ready : null; // 沒登入就不開始（登入畫面顯示中），登入後才讀雲端
   }).then(function () {
     var cfg = getConfig();

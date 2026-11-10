@@ -8,10 +8,27 @@
  *   moves     生產 { id, type: 'production', seq, date, product, batch, manufactureDate, expiryDate, quantity, note, by, at, ... }
  *             出貨 { id, type: 'shipment', seq, date, product, quantity, orderNo, note, by, at, ... }
  *   product 欄位存「產品名稱」（不是 id），和舊的網頁版、離線版 JSON 備份格式相同。
- * 分頁（網址 #）：dashboard opening production shipment batches allocations products manage users
+ * 分頁（網址 #）：dashboard opening production shipment portal batches allocations products manage users
  * 權限：FEAuth.can(代號)，管理員全部都有。代號見 PERMS。這是畫面權限，雲端後端只擋「不在名單的人」。
+ *
+ * 入口網站同步（#portal）：入口網站 cheeseduke.flowings.app 要 Google 登入，App 不能直接去讀，所以用書籤：
+ *   書籤在入口網站讀「物管駕駛艙 → 總表」的 API（/api/internal/logistics-console/hq-ledger?date=，只讀）最近 14 天，
+ *   每天每個品號取 row.semiIn（半成品入庫）與 row.actualPick（實際揀貨），放進網址 #portal= 後開啟 App。
+ *   App 一開啟就把資料收進 sessionStorage（fe_portal_pending）並清掉網址，登入且資料載入後才寫入：
+ *     半成品入庫 → 生產紀錄 id = 'pt-p-日期-品號'；實際揀貨 → 出貨紀錄 id = 'pt-s-日期-品號'（同一天同品號只有一筆，重複同步只更新）。
+ *     書籤讀到的日期中，入口網站已經沒有數字的 pt- 紀錄會刪掉（以入口網站為準）。起算日（settings 'portal'.syncFrom，
+ *     預設＝期初庫存最晚入帳日的隔天）以前的日期不匯入。品號用產品名稱第一段（「品號 品名」）對應，對不到就新增產品。
  */
 'use strict';
+
+/* 入口網站書籤帶來的資料：越早收起來越好（登入畫面或重新載入都不會弄丟），並把很長的網址換掉 */
+const PORTAL_PENDING = 'fe_portal_pending';
+(function stashPortal() {
+  const m = /^#portal=([A-Za-z0-9_-]+)$/.exec(location.hash || '');
+  if (!m) return;
+  try { sessionStorage.setItem(PORTAL_PENDING, m[1]); } catch (e) {}
+  try { history.replaceState(null, '', location.pathname + location.search + '#portal'); } catch (e) {}
+})();
 
 const PERMS = [
   { id: 'produce', label: '生產與期初庫存', desc: '新增、修改、刪除期初庫存與每日生產紀錄' },
@@ -94,13 +111,14 @@ function rebuild() {
 
 /* ---------- 寫入（先存這台裝置，背景上傳雲端） ---------- */
 const kindOfRec = r => r.type === 'opening' ? 'opening' : 'moves';
-function storeRecord(rec) {
+function recordBody(rec) {
   const b = { id: rec.id, type: rec.type, seq: rec.seq, product: rec.product, quantity: rec.quantity, note: rec.note || '', by: rec.by || '', at: rec.at || '' };
   if (rec.editBy) { b.editBy = rec.editBy; b.editAt = rec.editAt; }
   if (rec.type === 'shipment') { b.date = rec.date; b.orderNo = rec.orderNo || ''; }
   else { b.batch = rec.batch; b.manufactureDate = rec.manufactureDate; b.expiryDate = rec.expiryDate; if (rec.type === 'opening') b.entryDate = rec.entryDate; else b.date = rec.date; }
-  FEStore.save(kindOfRec(rec), b);
+  return b;
 }
+function storeRecord(rec) { FEStore.save(kindOfRec(rec), recordBody(rec)); }
 const storeProduct = p => FEStore.save('products', { id: p.id, name: p.name, unit: p.unit, shelfDays: p.shelfDays, lowStock: p.lowStock });
 function replaceAll(st) {
   const strip = r => { const { virtual, ...x } = r; return x; };
@@ -186,9 +204,9 @@ const permFor = type => type === 'shipment' ? 'ship' : 'produce';
 const manageCol = type => can(permFor(type)) ? ['管理'] : [];
 const manageCell = (kind, id) => can(permFor(kind)) ? td(`<div class="segment"><button type="button" class="btn small" data-action="edit-${kind}" data-id="${esc(id)}">修改</button><button type="button" class="btn small danger" data-action="delete-${kind}" data-id="${esc(id)}">刪除</button></div>`) : '';
 
-const VIEWS = { dashboard: ['營運總覽', '每日生產、出貨及批次有效日期，即時統整。'], opening: ['期初庫存建檔', '原始庫存按製作日期分開管理，不需擔心同批不同效期。'], production: ['每日生產登錄', '每筆生產都會自動增加可出貨批次庫存。'], shipment: ['每日出貨登錄', '自動從有效期最近的庫存開始扣除。'], batches: ['批次庫存與效期', '依製作日期和有效日期追蹤每一批剩餘量。'], allocations: ['出貨扣批明細', '每張出貨單實際扣除了哪些製作日期，一目了然。'], products: ['產品庫存總表', '總庫存、近效期及過期量依產品清楚呈現。'], manage: ['資料與設定', '備份、效期預警及產品基本設定。'], users: ['人員與權限', '管理誰可以登入，以及每個人能做的事。'] };
+const VIEWS = { dashboard: ['營運總覽', '每日生產、出貨及批次有效日期，即時統整。'], opening: ['期初庫存建檔', '原始庫存按製作日期分開管理，不需擔心同批不同效期。'], production: ['每日生產登錄', '每筆生產都會自動增加可出貨批次庫存。'], shipment: ['每日出貨登錄', '自動從有效期最近的庫存開始扣除。'], portal: ['入口網站同步', '從入口網站總表帶入每日半成品入庫（生產）與實際揀貨（出貨）。'], batches: ['批次庫存與效期', '依製作日期和有效日期追蹤每一批剩餘量。'], allocations: ['出貨扣批明細', '每張出貨單實際扣除了哪些製作日期，一目了然。'], products: ['產品庫存總表', '總庫存、近效期及過期量依產品清楚呈現。'], manage: ['資料與設定', '備份、效期預警及產品基本設定。'], users: ['人員與權限', '管理誰可以登入，以及每個人能做的事。'] };
 function showView(view) {
-  if (!VIEWS[view] || (view === 'users' && !isAdmin())) { view = 'dashboard'; if (location.hash && location.hash !== '#dashboard') try { history.replaceState(null, '', '#dashboard'); } catch (e) {} }
+  if (!VIEWS[view] || (view === 'users' && !isAdmin()) || (view === 'portal' && window.FEAuth && FEAuth.user() && !canPortal())) { view = 'dashboard'; if (location.hash && location.hash !== '#dashboard') try { history.replaceState(null, '', '#dashboard'); } catch (e) {} }
   const changed = currentView !== view; currentView = view;
   document.querySelectorAll('.section').forEach(e => e.classList.toggle('active', e.id === view));
   document.querySelectorAll('.nav-btn').forEach(b => b.classList.toggle('active', b.dataset.view === view));
@@ -203,7 +221,7 @@ let renderQueued = false;
 function scheduleRender() { if (renderQueued) return; renderQueued = true; setTimeout(() => { renderQueued = false; render(); }, 0); }
 function render() {
   const today = TODAY(), current = calculateLedger(today), full = calculateLedger(), groups = groupLots(current), prod = productSummary(current, today);
-  renderDashboard(today, current, groups, prod); renderOpening(); renderProduction(); renderShipments(full); renderBatches(groups, today); renderAllocations(full); renderProducts(prod); renderSettings();
+  renderDashboard(today, current, groups, prod); renderOpening(); renderProduction(); renderShipments(full); renderBatches(groups, today); renderAllocations(full); renderProducts(prod); renderSettings(); renderPortal();
   $('productNames').innerHTML = data.products.map(p => `<option value="${esc(p.name)}"></option>`).join('');
   const empty = !data.opening.length && !data.movements.length;
   $('welcome').hidden = loading() || !empty || !(isAdmin() || can('produce'));
@@ -292,6 +310,7 @@ function applyPerms() {
   const cl = document.body.classList;
   cl.toggle('is-admin', isAdmin());
   for (const p of PERMS) cl.toggle('can-' + p.id, can(p.id));
+  cl.toggle('can-portal', canPortal());
   const n = myName(); $('meName').textContent = n; $('meName2').textContent = n;
   if (currentView === 'users' && !isAdmin()) go('dashboard');
   renderBanner();
@@ -434,6 +453,128 @@ async function exportXlsx() {
   catch (err) { toast(err.message || 'Excel 產生失敗', true); }
 }
 
+/* ---------- 入口網站同步（書籤帶入 半成品入庫＝生產、實際揀貨＝出貨）---------- */
+const PORTAL_URL = 'https://cheeseduke.flowings.app/logistics-console';
+const PORTAL_DAYS = 14;
+const CODE_RE = /^[\w.|\-]{1,60}$/;
+const canPortal = () => can('produce') || can('ship');
+const portalMeta = () => FEStore.get('settings', 'portal') || {};
+function defaultSyncFrom() { const last = data.opening.reduce((m, r) => r.entryDate > m ? r.entryDate : m, ''); return last ? addDays(last, 1) : ''; }
+const syncFromDate = () => isDate(portalMeta().syncFrom) ? portalMeta().syncFrom : defaultSyncFrom();
+const productCodeOf = name => { const s = clean(name), i = s.indexOf(' '); return i > 0 ? s.slice(0, i) : s; };
+function decodeB64url(s) { s = s.replace(/-/g, '+').replace(/_/g, '/'); while (s.length % 4) s += '='; return JSON.parse(decodeURIComponent(escape(atob(s)))); }
+// 書籤資料整理乾淨：{ v:1, t: 書籤當天, d: { 日期: [[品號, 品名, 半成品入庫, 實際揀貨], ...] }, w: 讀取失敗的日期說明 }
+function cleanPortal(p) {
+  if (!p || p.v !== 1 || !p.d || typeof p.d !== 'object') throw Error('資料格式不對，請重新拖曳最新的書籤');
+  const days = {};
+  for (const ds of Object.keys(p.d).slice(0, 62)) {
+    if (!isDate(ds) || !Array.isArray(p.d[ds])) continue;
+    const rows = [], seen = new Set();
+    for (const a of p.d[ds].slice(0, 3000)) {
+      if (!Array.isArray(a)) continue;
+      const code = clean(a[0]), inQ = Number(a[2]), outQ = Number(a[3]);
+      if (!CODE_RE.test(code) || seen.has(code)) continue;
+      seen.add(code);
+      rows.push({ code, name: clean(a[1]).slice(0, 40), inQ: inQ > 0 && inQ < 1e7 ? clampQty(inQ) : 0, outQ: outQ > 0 && outQ < 1e7 ? clampQty(outQ) : 0 });
+    }
+    days[ds] = rows;
+  }
+  if (!Object.keys(days).length) throw Error('沒有讀到任何日期的總表');
+  return { days, warn: typeof p.w === 'string' ? p.w.slice(0, 300) : '' };
+}
+let portalApplying = false;
+function applyPortalPending() {
+  if (portalApplying || loading() || !window.FEAuth || !FEAuth.user()) return;
+  let raw = null; try { raw = sessionStorage.getItem(PORTAL_PENDING); } catch (e) {}
+  if (!raw) return;
+  try { sessionStorage.removeItem(PORTAL_PENDING); } catch (e) {}
+  const okP = can('produce'), okS = can('ship');
+  if (!okP && !okS) { toast('你沒有「生產與期初庫存」或「出貨」的權限，這次入口網站的資料沒有存。請找管理員開權限。', true, 8000); return; }
+  portalApplying = true;
+  try {
+    const c = cleanPortal(decodeB64url(raw)), today = TODAY(), from = syncFromDate();
+    const all = Object.keys(c.days).sort();
+    const dates = all.filter(d => d <= today && (!from || d >= from));
+    const before = all.filter(d => from && d < from);
+    const byCode = new Map();
+    for (const p of data.products) { const k = productCodeOf(p.name); if (!byCode.has(k) || byCode.get(k).virtual) byCode.set(k, p); }
+    const newProducts = [];
+    const productFor = (code, name) => {
+      let p = byCode.get(code);
+      if (!p || p.virtual) { const nm = `${code} ${name}`.trim(); p = { id: productId(nm), name: nm, unit: '個', shelfDays: data.settings.defaultShelf, lowStock: 0 }; byCode.set(code, p); newProducts.push(p); }
+      return p;
+    };
+    const existing = new Map(data.movements.filter(r => r.id.startsWith('pt-')).map(r => [r.id, r]));
+    const saves = [], removes = [], who = myName(), at = nowIso(), sum = { pN: 0, pQ: 0, sN: 0, sQ: 0 };
+    for (const ds of dates) {
+      const want = new Set();
+      for (const r of c.days[ds]) {
+        if (okP && r.inQ > 0) {
+          const p = productFor(r.code, r.name), id = `pt-p-${ds}-${r.code}`, old = existing.get(id);
+          want.add(id); sum.pN++; sum.pQ += r.inQ;
+          const rec = old ? { ...old, product: p.name, quantity: r.inQ } : { id, type: 'production', seq: nextSeq(), date: ds, product: p.name, batch: ds.replace(/-/g, ''), manufactureDate: ds, expiryDate: addDays(ds, p.shelfDays), quantity: r.inQ, note: '入口網站：半成品入庫', by: who, at };
+          if (!old || old.quantity !== rec.quantity || old.product !== rec.product) saves.push(rec);
+        }
+        if (okS && r.outQ > 0) {
+          const p = productFor(r.code, r.name), id = `pt-s-${ds}-${r.code}`, old = existing.get(id);
+          want.add(id); sum.sN++; sum.sQ += r.outQ;
+          const rec = old ? { ...old, product: p.name, quantity: r.outQ } : { id, type: 'shipment', seq: nextSeq(), date: ds, product: p.name, quantity: r.outQ, orderNo: '入口網站：實際揀貨', note: '', by: who, at };
+          if (!old || old.quantity !== rec.quantity || old.product !== rec.product) saves.push(rec);
+        }
+      }
+      for (const [id, r] of existing) if (r.date === ds && !want.has(id) && ((r.type === 'production' && okP) || (r.type === 'shipment' && okS))) removes.push(id);
+    }
+    if (newProducts.length) FEStore.saveMany('products', newProducts.map(p => ({ id: p.id, name: p.name, unit: p.unit, shelfDays: p.shelfDays, lowStock: 0 })));
+    if (saves.length) FEStore.saveMany('moves', saves.map(recordBody));
+    if (removes.length) FEStore.removeMany('moves', removes);
+    const meta = portalMeta();
+    FEStore.save('settings', { ...meta, id: 'portal', at: Date.now(), by: who, first: dates[0] || '', last: dates[dates.length - 1] || '', days: dates.length, ...sum, pQ: clampQty(sum.pQ), sQ: clampQty(sum.sQ), newProducts: newProducts.length, changed: saves.length + removes.length, warn: c.warn });
+    const range = dates.length ? `${shortDate(dates[0])}～${shortDate(dates[dates.length - 1])}` : '沒有可匯入的日期';
+    const parts = [okP ? `生產 ${sum.pN} 筆（${fmt(sum.pQ)} 個）` : '', okS ? `出貨 ${sum.sN} 筆（${fmt(sum.sQ)} 個）` : ''].filter(Boolean).join('、');
+    const notes = [newProducts.length ? `新增產品 ${newProducts.length} 項` : '', before.length ? `起算日 ${from} 以前的 ${before.length} 天沒有匯入` : '', !okP ? '你沒有生產權限，生產數字沒有存' : '', !okS ? '你沒有出貨權限，出貨數字沒有存' : '', c.warn ? '注意：' + c.warn : ''].filter(Boolean).join('；');
+    toast(`已同步入口網站 ${range}：${parts}${saves.length + removes.length ? '' : '（數字都沒變）'}${notes ? '。' + notes : ''}`, false, 9000);
+    go('portal');
+  } catch (e) { toast('入口網站資料讀取失敗：' + e.message, true, 8000); }
+  finally { portalApplying = false; }
+}
+// 書籤：在入口網站讀最近 14 天的總表（只讀），每天每個品號 [品號, 品名, 半成品入庫, 實際揀貨]，放在網址 #portal= 後開啟 App
+function portalBookmarklet() {
+  const app = location.origin + location.pathname;
+  const code = "(async()=>{" +
+    "if(location.hostname.indexOf('flowings.app')<0){if(confirm('這顆書籤要在「入口網站」的頁面按，你現在在別的網站。\\n\\n要現在打開入口網站嗎？打開後請登入，再按一次這顆書籤。'))window.open('" + PORTAL_URL + "','_blank');return}" +
+    "var ov=document.createElement('div');ov.textContent='正在讀取總表最近 " + PORTAL_DAYS + " 天的半成品入庫與實際揀貨…';ov.style.cssText='position:fixed;left:50%;top:20px;transform:translateX(-50%);z-index:2147483647;background:#153b48;color:#fff;padding:12px 18px;border-radius:10px;font:14px sans-serif;box-shadow:0 8px 30px rgba(0,0,0,.3)';document.body.appendChild(ov);" +
+    "try{var p=function(n){return String(n).padStart(2,'0')},f=function(d){return d.getFullYear()+'-'+p(d.getMonth()+1)+'-'+p(d.getDate())},now=new Date(),D={},bad=[],days=[];" +
+    "for(var i=" + (PORTAL_DAYS - 1) + ";i>=0;i--)days.push(f(new Date(now.getFullYear(),now.getMonth(),now.getDate()-i)));" +
+    "await Promise.all(days.map(async function(ds){var u=location.origin+'/api/internal/logistics-console/hq-ledger?date='+ds;" +
+    "try{var r=await fetch(u,{credentials:'include',headers:{Accept:'application/json'}});if(!r.ok){bad.push(ds+' HTTP '+r.status);return}" +
+    "var j=await r.json(),L=[];(j.rows||[]).forEach(function(x){var w=x.row||{},a=Number(w.semiIn)||0,b=Number(w.actualPick)||0;if(x.code&&(a>0||b>0))L.push([x.code,String(x.name||'').slice(0,30),a,b])});D[ds]=L}catch(e1){bad.push(ds+' '+e1.message)}}));" +
+    "if(!Object.keys(D).length)throw new Error('總表沒有讀到任何日期'+(bad.length?'（'+bad.join('；')+'）':''));" +
+    "var s=btoa(unescape(encodeURIComponent(JSON.stringify({v:1,t:f(now),d:D,w:bad.length?'這幾天沒讀到：'+bad.join('；'):''})))).replace(/\\+/g,'-').replace(/\\//g,'_').replace(/=+$/,'');" +
+    "ov.textContent='讀取完成，正在開啟庫存效期 App…';location.href='" + app + "#portal='+s}catch(e){ov.remove();alert('讀取入口網站失敗：'+e.message+'\\n\\n請確認已經登入入口網站，並在入口網站的頁面（例如物管駕駛艙總表）按這個書籤')}})()";
+  return 'javascript:' + encodeURIComponent(code);
+}
+function renderPortal() {
+  const m = portalMeta(), from = syncFromDate();
+  $('portalKpis').innerHTML = [
+    ['上次同步', m.at ? new Date(m.at).toLocaleString('zh-TW', { month: 'numeric', day: 'numeric', hour: '2-digit', minute: '2-digit' }) : '還沒同步過', m.by || '', m.at ? '' : 'warn'],
+    ['同步的日期', m.last ? `${shortDate(m.first)}～${shortDate(m.last)}` : '—', m.days ? `${m.days} 天` : '', ''],
+    ['上次帶入', m.at ? `${fmt(m.pQ)} / ${fmt(m.sQ)}` : '—', m.at ? `生產 ${m.pN} 筆／出貨 ${m.sN} 筆（個）` : '生產／出貨', ''],
+    ['起算日', from || '不限', isDate(m.syncFrom) ? '手動設定' : '期初庫存入帳日的隔天', ''],
+  ].map(([l, v, d, c]) => `<article class="kpi ${c}"><div class="kpi-label">${esc(l)}</div><div class="kpi-value" style="font-size:20px">${esc(v)}</div><div class="kpi-desc">${esc(d)}</div></article>`).join('');
+  const fEl = $('portalFrom'); if (document.activeElement !== fEl) fEl.value = from || '';
+  $('portalFromHint').textContent = isDate(m.syncFrom) ? '' : '目前用預設：期初庫存最晚入帳日的隔天';
+  const ledger = calculateLedger(), by = new Map();
+  for (const r of data.movements) {
+    if (!r.id.startsWith('pt-')) continue;
+    if (!by.has(r.date)) by.set(r.date, { date: r.date, pN: 0, pQ: 0, sN: 0, sQ: 0, short: 0 });
+    const g = by.get(r.date);
+    if (r.type === 'production') { g.pN++; g.pQ += r.quantity; } else { g.sN++; g.sQ += r.quantity; g.short += ledger.shipments.get(r.id)?.shortage || 0; }
+  }
+  const rows = [...by.values()].sort((a, b) => cmp(b.date, a.date));
+  $('portalCount').textContent = rows.length ? `共 ${rows.length} 天；要看明細，到「每日生產登錄」「每日出貨登錄」搜尋「入口網站」` : '入口網站帶入的生產與出貨紀錄，依日期彙總';
+  $('portalTable').innerHTML = table(['日期', '半成品入庫（生產）#', '筆數#', '實際揀貨（出貨）#', '筆數#', '出貨缺口#'], rows.map(g => `<tr>${tdm(g.date)}<td class="num">${fmt(g.pQ)}</td><td class="num">${g.pN}</td><td class="num">${fmt(g.sQ)}</td><td class="num">${g.sN}</td><td class="num">${g.short ? badge(fmt(g.short), 'bad') : '—'}</td></tr>`), '還沒有從入口網站同步過');
+}
+
 /* ---------- 人員與權限（管理員）---------- */
 const U = { list: null, admins: [], loading: false, error: '' };
 async function loadUsers() {
@@ -505,6 +646,9 @@ function bind() {
   for (const p of ['o', 'p']) { for (const id of [`${p}Mfg`, `${p}Shelf`]) $(id).addEventListener('change', () => autoExpiry(p)); $(`${p}Product`).addEventListener('change', () => productDefaults(p)); }
   $('pDate').addEventListener('change', () => { $('pMfg').value = $('pDate').value; autoExpiry('p'); });
   for (const id of ['sDate', 'sProduct', 'sQty']) $(id).addEventListener('input', previewForShipment);
+  const bm = $('portalBm'); bm.setAttribute('href', portalBookmarklet());
+  bm.addEventListener('click', e => { e.preventDefault(); toast('請把這顆按鈕「拖曳」到瀏覽器的書籤列，再到入口網站的頁面按書籤。'); });
+  $('portalFromForm').addEventListener('submit', e => { e.preventDefault(); if (!can('setting')) return; const v = $('portalFrom').value; if (v && !isDate(v)) { toast('請選擇有效的日期', true); return; } act(() => { FEStore.save('settings', { ...portalMeta(), id: 'portal', syncFrom: v || '' }); toast(v ? `起算日已設為 ${v}；之後同步只匯入這天以後的數字` : '已改回預設起算日'); }); });
   $('importFile').addEventListener('change', async e => {
     const file = e.target.files && e.target.files[0]; e.target.value = ''; if (!file || !isAdmin()) return;
     let incoming; try { incoming = validateImport(JSON.parse(await file.text())); } catch (err) { toast(`匯入失敗：${err.message}`, true, 6000); return; }
@@ -518,12 +662,12 @@ function bind() {
 let lastLoaded = false;
 FEStore.on((type, payload) => {
   if (type === 'change') { rebuild(); scheduleRender(); }
-  else if (type === 'status') { renderSync(); renderBanner(); const l = !!FEStore.status().loaded; if (l !== lastLoaded) { lastLoaded = l; scheduleRender(); } }
+  else if (type === 'status') { renderSync(); renderBanner(); const l = !!FEStore.status().loaded; if (l !== lastLoaded) { lastLoaded = l; scheduleRender(); } if (l) setTimeout(applyPortalPending, 0); }
   else if (type === 'conflict') toast('有同事同時修改了同一筆資料，已自動合併；同一個欄位以你的修改為準。');
 });
 FEAuth.on(() => { applyPerms(); scheduleRender(); });
 bind(); resetForms(); showView(location.hash.slice(1) || 'dashboard'); renderSync();
-FEAuth.ready.then(() => { applyPerms(); rebuild(); resetForms(); render(); });
+FEAuth.ready.then(() => { applyPerms(); rebuild(); resetForms(); render(); applyPortalPending(); });
 if ('serviceWorker' in navigator && location.protocol === 'https:') {
   window.addEventListener('load', () => { navigator.serviceWorker.register('service-worker.js').catch(() => {}); });
 }

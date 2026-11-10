@@ -30,6 +30,7 @@
     <a class="nav-btn" href="#opening" data-view="opening"><span class="nav-ico" aria-hidden="true">▣</span>期初庫存建檔</a>
     <a class="nav-btn" href="#production" data-view="production"><span class="nav-ico" aria-hidden="true">▤</span>每日生產登錄</a>
     <a class="nav-btn" href="#shipment" data-view="shipment"><span class="nav-ico" aria-hidden="true">⇧</span>每日出貨登錄</a>
+    <a class="nav-btn need-portal" href="#portal" data-view="portal"><span class="nav-ico" aria-hidden="true">⟳</span>入口網站同步</a>
     <a class="nav-btn" href="#batches" data-view="batches"><span class="nav-ico" aria-hidden="true">▦</span>批次庫存與效期</a>
     <a class="nav-btn" href="#allocations" data-view="allocations"><span class="nav-ico" aria-hidden="true">≋</span>出貨扣批明細</a>
     <a class="nav-btn" href="#products" data-view="products"><span class="nav-ico" aria-hidden="true">◈</span>產品庫存總表</a>
@@ -118,6 +119,21 @@
       <div class="field span4"><div id="shipmentPreview" class="notice">選擇產品並輸入數量，即可預覽最早效期庫存與可能的缺口。</div><div class="form-actions"><button id="sSubmit" type="submit" class="btn primary">＋ 儲存出貨紀錄</button><button id="sCancel" type="button" class="btn hide" data-action="cancel-shipment">取消編輯</button></div></div>
     </form></div></div>
     <div class="panel"><div class="panel-head"><div><h2>每日出貨紀錄</h2><p id="shipmentCount">0 筆資料</p></div><div class="toolbar"><input id="shipmentFilter" class="search" type="search" placeholder="搜尋日期／產品／出貨單" aria-label="搜尋出貨紀錄"><button type="button" class="btn small" data-action="csv-shipment">匯出 CSV</button></div></div><div id="shipmentTable" class="table-scroll"></div></div>
+  </section>
+
+  <section id="portal" class="section">
+    <div class="notice">從入口網站（物管駕駛艙「總表」）帶入每日數字：<strong>半成品入庫</strong>登錄成「每日生產」，<strong>實際揀貨</strong>登錄成「每日出貨」，用<strong>品號</strong>對應產品。入口網站要 Google 登入，所以用書籤一鍵帶過來，不用抄數字。</div>
+    <div id="portalKpis" class="grid-kpi"></div>
+    <div class="panel"><div class="panel-head"><div><h2>怎麼同步</h2><p>電腦版 Chrome／Edge；手機沒有書籤列，請用電腦操作</p></div></div><div class="panel-body">
+      <ol class="step-list">
+        <li>第一次：把這顆按鈕<strong>拖曳到瀏覽器的書籤列</strong>（按 Ctrl+Shift+B 可以顯示書籤列）：<br><a class="btn primary bm-btn" id="portalBm" href="#portal" draggable="true">同步生產與出貨</a></li>
+        <li>打開<a href="https://cheeseduke.flowings.app/logistics-console" target="_blank" rel="noopener">入口網站的總表</a>並登入（Google 登入），等表格出現。</li>
+        <li>在<strong>入口網站的頁面上</strong>按書籤列的「同步生產與出貨」→ 會自動回到這個 App，存好並同步給大家。</li>
+      </ol>
+      <p class="helper">書籤一次讀最近 14 天的總表（只讀，不會改動入口網站的任何資料），數字放在網址 # 後面，不會傳給任何伺服器。同一天、同一個品號只會有一筆，重複同步會更新成入口網站最新的數字，不會重複登錄；入口網站改過數字，再同步一次就好。生產的製作日期與批號用入庫日期，有效日期＝入庫日期＋產品保存天數。</p>
+    </div></div>
+    <div class="panel need-setting"><div class="panel-head"><div><h2>同步起算日</h2><p>這一天以前的入口網站數字不會匯入，避免和期初庫存重複計算</p></div></div><div class="panel-body"><form id="portalFromForm" class="form-grid" novalidate><div class="field"><label for="portalFrom">起算日</label><input id="portalFrom" type="date"><span class="hint" id="portalFromHint"></span></div><div class="field"><label class="spacer-label">&nbsp;</label><div class="form-actions"><button type="submit" class="btn primary">儲存起算日</button></div></div></form></div></div>
+    <div class="panel"><div class="panel-head"><div><h2>已同步的每日數字</h2><p id="portalCount">入口網站帶入的生產與出貨紀錄，依日期彙總</p></div></div><div id="portalTable" class="table-scroll"></div></div>
   </section>
 
   <section id="batches" class="section">
