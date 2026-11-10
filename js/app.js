@@ -297,11 +297,25 @@ function renderShipments(ledger) {
   $('shipmentCount').textContent = `共 ${list.length} 筆出貨`;
   $('shipmentTable').innerHTML = table(['出貨日期', '產品', '出貨單號／客戶', '需求量#', '實際出貨#', '缺口', '扣貨批數#', '備註', '登錄人', ...manageCol('shipment')], rows.map(x => { const s = ledger.shipments.get(x.id) || { shipped: 0, shortage: x.quantity, allocations: [] }; return `<tr>${tdm(x.date)}${td(`<strong>${esc(x.product)}</strong>`)}${td(esc(x.orderNo || '—'))}<td class="num">${fmt(x.quantity)} ${esc(getUnit(x.product))}</td><td class="num">${fmt(s.shipped)}</td>${td(s.shortage ? badge(`${fmt(s.shortage)} 未配`, 'bad') : badge('足額', 'ok'))}<td class="num">${s.allocations.length}</td>${td(esc(x.note || '—'))}${tdWho(x)}${manageCell('shipment', x.id)}</tr>`; }), '尚未登錄出貨紀錄');
 }
+// 每個產品一列：同一個有效日期合在一起，不同有效日期分開列（顏色＝效期狀態）；逐批號的明細用「匯出 CSV」
 function renderBatches(groups, today) {
-  const base = $('batchLive').checked ? groups.filter(x => x.remaining > 0) : groups;
-  const rows = searchable(base.map(x => ({ ...x, kind: poolLabel(x.pool, today) })), $('batchFilter').value, ['product', 'batch', 'manufactureDate', 'expiryDate', 'kind']);
-  $('batchCount').textContent = `共 ${groups.length} 組產品／類別／批號／製作日／有效日組合，目前有庫存 ${groups.filter(x => x.remaining > 0).length} 組`;
-  $('batchTable').innerHTML = table(['產品', '類別', '批號', '製作日期', '有效日期', '入庫#', '已出貨#', '轉成現貨#', '剩餘庫存#', '效期狀態'], rows.map(x => { const s = expiryStatus(x.expiryDate, x.remaining, today); return `<tr>${td(`<strong>${esc(x.product)}</strong>`)}${td(badge(x.kind, x.kind === '現貨' ? 'future' : 'other'))}${tdm(x.batch)}${tdm(x.manufactureDate)}${tdm(expShow(x.expiryDate))}<td class="num" title="期初 ${fmt(x.opening)}／生產 ${fmt(x.production)}／半成品轉入 ${fmt(x.convert)}">${fmt(x.inQty)}</td><td class="num">${fmt(x.shipped)}</td><td class="num">${x.converted ? fmt(x.converted) : '—'}</td><td class="num">${fmt(x.remaining)} ${esc(x.unit)}</td>${td(badge(s.label, s.cls))}</tr>`; }), '尚無批次庫存紀錄');
+  const split = !isStockModeDay(today), byP = new Map();
+  for (const g of groups) {
+    if (!byP.has(g.product)) byP.set(g.product, { product: g.product, unit: g.unit, stock: 0, semi: 0, total: 0, exps: new Map() });
+    if (!(g.remaining > 0)) continue;
+    const p = byP.get(g.product);
+    if (!p.exps.has(g.expiryDate)) p.exps.set(g.expiryDate, { expiry: g.expiryDate, stock: 0, semi: 0, total: 0, batches: new Set() });
+    const e = p.exps.get(g.expiryDate), isStock = g.pool === 'stock';
+    e[isStock ? 'stock' : 'semi'] = clampQty(e[isStock ? 'stock' : 'semi'] + g.remaining); e.total = clampQty(e.total + g.remaining); e.batches.add(g.batch);
+    p[isStock ? 'stock' : 'semi'] = clampQty(p[isStock ? 'stock' : 'semi'] + g.remaining); p.total = clampQty(p.total + g.remaining);
+  }
+  const list = [...byP.values()].map(p => { const exps = [...p.exps.values()].sort((a, b) => (a.expiry === NO_EXPIRY ? 0 : 1) - (b.expiry === NO_EXPIRY ? 0 : 1) || cmp(a.expiry, b.expiry)); const first = exps.find(e => e.expiry !== NO_EXPIRY) || exps[0]; return { ...p, exps, first: first ? first.expiry : '', expText: exps.map(e => e.expiry).join(' ') }; });
+  const base = $('batchLive').checked ? list.filter(p => p.total > 0) : list;
+  const rows = searchable(base, $('batchFilter').value, ['product', 'expText']).sort((a, b) => (a.total > 0 ? 0 : 1) - (b.total > 0 ? 0 : 1) || cmp(a.first || '9999', b.first || '9999') || cmp(a.product, b.product));
+  const nExp = list.reduce((s, p) => s + p.exps.length, 0);
+  $('batchCount').textContent = `目前有庫存的產品 ${list.filter(p => p.total > 0).length} 項、共 ${nExp} 個不同有效日期；最早到期的排最上面`;
+  const chip = (e, unit) => { const s = expiryStatus(e.expiry, e.total, today); const part = split ? (e.stock && e.semi ? `（現貨 ${fmt(e.stock)}・半成品 ${fmt(e.semi)}）` : e.stock ? '（現貨）' : '（半成品）') : ''; return `<span class="pill ${s.cls} exp-chip" title="${esc(`${expShow(e.expiry)}｜${s.label}｜批號 ${[...e.batches].join('、')}`)}"><span class="mono">${esc(expShow(e.expiry) === '—' ? '期初現貨' : expShow(e.expiry))}</span> ${esc(fmt(e.total))} ${esc(unit)}${esc(part)}</span>`; };
+  $('batchTable').innerHTML = table(['產品', '各有效日期的數量（由早到晚，顏色＝效期狀態）', '剩餘庫存#', ...(split ? ['現貨#', '半成品#'] : []), '最早效期狀態'], rows.map(p => { const s = p.total > 0 ? expiryStatus(p.first || NO_EXPIRY, p.total, today) : { label: '已用完', cls: 'other' }; return `<tr>${td(`<strong>${esc(p.product)}</strong>`)}<td class="exp-cell"><div class="exp-chips">${p.exps.map(e => chip(e, p.unit)).join('') || '<span class="who">—</span>'}</div></td><td class="num">${fmt(p.total)} ${esc(p.unit)}</td>${split ? `<td class="num">${p.stock ? fmt(p.stock) : '—'}</td><td class="num">${p.semi ? fmt(p.semi) : '—'}</td>` : ''}${td(badge(s.label, s.cls))}</tr>`; }), '尚無批次庫存紀錄');
 }
 function allocationRows(ledger) { const rows = []; for (const sh of [...data.movements.filter(x => x.type === 'shipment')].sort((a, b) => cmp(b.date, a.date) || b.seq - a.seq)) { const r = ledger.shipments.get(sh.id); if (!r) continue; for (const a of r.allocations) rows.push({ date: sh.date, orderNo: sh.orderNo || '', product: sh.product, batch: a.batch, pool: poolLabel(a.pool, sh.date), manufactureDate: a.manufactureDate, expiryDate: a.expiryDate, quantity: a.quantity, unit: getUnit(sh.product), kind: 'allocated' }); if (r.shortage) rows.push({ date: sh.date, orderNo: sh.orderNo || '', product: sh.product, batch: '未分配', manufactureDate: '', expiryDate: '', quantity: r.shortage, unit: getUnit(sh.product), kind: 'shortage' }); } return rows; }
 function renderAllocations(ledger) {

@@ -50,6 +50,10 @@ h1,h2,h3{text-wrap:balance}
 /* 權限：沒有權限的人看不到對應的按鈕與表單 */
 body:not(.can-produce) .need-produce,body:not(.can-ship) .need-ship,body:not(.can-setting) .need-setting,body:not(.is-admin) .need-admin,body:not(.can-portal) .need-portal{display:none!important}
 .bm-btn{margin:6px 0;cursor:grab}
+.data-table td.exp-cell{white-space:normal;min-width:280px}
+.exp-chips{display:flex;flex-wrap:wrap;gap:6px}
+.exp-chip{font-weight:600}
+.exp-chip .mono{font-weight:700}
 
 /* 登入畫面（auth.js） */
 html.auth-locked .app{display:none}
