@@ -61,6 +61,9 @@ const nowIso = () => new Date().toISOString();
 // 現貨（已包裝好的成品）沒有效期資料：存成 pool = 'stock'、有效日期 9999-12-31 的批次，出貨時先扣現貨，不夠才照效期扣半成品
 const NO_EXPIRY = '9999-12-31';
 const expShow = d => d === NO_EXPIRY ? '—' : d;
+// 不需要管理的產品：品名含這些字的（例如「CK-08|YA-23 6朱|擺盤」）不同步、不顯示，所有表格與計算都當作不存在
+const EXCLUDE_WORDS = ['擺盤'];
+const isExcluded = name => EXCLUDE_WORDS.some(w => String(name || '').includes(w));
 const blankState = () => ({ version: 1, products: [], opening: [], movements: [], settings: { warnDays: 30, defaultShelf: 30 } });
 
 /* ---------- 狀態 ---------- */
@@ -105,11 +108,11 @@ function addVirtualProducts(st) {
 }
 function rebuild() {
   const seen = new Set();
-  const products = FEStore.list('products').map(normProduct).filter(p => p && !seen.has(p.name) && seen.add(p.name));
+  const products = FEStore.list('products').map(normProduct).filter(p => p && !isExcluded(p.name) && !seen.has(p.name) && seen.add(p.name));
   const settings = normSettings(FEStore.get('settings', 'main'));
   const opening = [], movements = [];
-  for (const r of FEStore.list('opening')) { const x = sanitizeRec({ ...r, type: 'opening' }); if (x) opening.push(x); }
-  for (const r of FEStore.list('moves')) { const x = sanitizeRec(r); if (x && x.type !== 'opening') movements.push(x); }
+  for (const r of FEStore.list('opening')) { const x = sanitizeRec({ ...r, type: 'opening' }); if (x && !isExcluded(x.product)) opening.push(x); }
+  for (const r of FEStore.list('moves')) { const x = sanitizeRec(r); if (x && x.type !== 'opening' && !isExcluded(x.product)) movements.push(x); }
   data = addVirtualProducts({ version: 1, products, opening, movements, settings });
 }
 
@@ -461,6 +464,7 @@ function baseRow(prefix, dateKey) {
   return { name, unit, batch, manufactureDate, expiryDate, entryDate, quantity: inputPositive(`${prefix}Qty`), note: clean($(`${prefix}Note`).value), shelfDays: Number($(`${prefix}Shelf`).value) };
 }
 function ensureProductSaved(name, unit, shelfDays) {
+  if (isExcluded(name)) throw Error(`品名有「${EXCLUDE_WORDS.join('、')}」的產品不用管理，不能登錄`);
   const m = getProduct(name);
   if (m && !m.virtual) { if (m.unit !== unit) throw Error(`「${name}」的單位已設定為「${m.unit}」，請統一使用相同單位`); return m; }
   const p = { id: productId(name), name, unit, shelfDays: Number.isInteger(shelfDays) && shelfDays >= 0 ? shelfDays : data.settings.defaultShelf, lowStock: 0 };
@@ -639,8 +643,14 @@ function applyPortalPending() {
   portalApplying = true;
   try {
     const c = cleanPortal(decodeB64url(raw)), today = TODAY(), from = syncFromDate();
-    const prefixes = portalPrefixes(), skippedCodes = new Set();
-    for (const ds of Object.keys(c.days)) c.days[ds] = c.days[ds].filter(r => prefixes.includes(codePrefix(r.code)) || (skippedCodes.add(r.code), false));
+    const prefixes = portalPrefixes(), skippedCodes = new Set(), excludedCodes = new Set();
+    // 擺盤等不需要的品號：總表品名有「擺盤」，或產品設定裡同品號的品名有「擺盤」
+    const exclCodes = new Set(FEStore.list('products').map(p => clean(p && p.name)).filter(isExcluded).map(productCodeOf));
+    for (const ds of Object.keys(c.days)) c.days[ds] = c.days[ds].filter(r => {
+      if (!prefixes.includes(codePrefix(r.code))) { skippedCodes.add(r.code); return false; }
+      if (exclCodes.has(r.code) || isExcluded(`${r.code} ${r.name}`)) { excludedCodes.add(r.code); return false; }
+      return true;
+    });
     const all = Object.keys(c.days).sort();
     const dates = all.filter(d => d <= today && (!from || d >= from));
     const before = all.filter(d => from && d < from);
@@ -728,7 +738,7 @@ function applyPortalPending() {
     FEStore.save('settings', { ...meta, id: 'portal', at: Date.now(), by: who, first: dates[0] || '', last: dates[dates.length - 1] || '', days: dates.length, ...sum, pQ: clampQty(sum.pQ), sQ: clampQty(sum.sQ), qQ: clampQty(sum.qQ), cQ: clampQty(sum.cQ), ...(stockOpen.set ? { stockOpenDate: from, stockOpenN: stockOpen.n, stockOpenQ: clampQty(stockOpen.q) } : {}), newProducts: newProducts.length, changed, warn: c.warn });
     const range = dates.length ? `${shortDate(dates[0])}～${shortDate(dates[dates.length - 1])}` : '沒有可匯入的日期';
     const parts = [okP ? `${modeB === dates.length && dates.length ? '當天生產' : modeB ? '半成品入庫／當天生產' : '半成品入庫'} ${sum.pN} 筆（${fmt(sum.pQ)} 個）` : '', okP && c.hasStock && sum.qN ? `生產轉現貨 ${sum.qN} 筆（${fmt(sum.qQ)} 個）` : '', okP && c.hasConvert && sum.cN ? `半成品轉現貨 ${sum.cN} 筆（${fmt(sum.cQ)} 個）` : '', okS ? `出貨 ${sum.sN} 筆（${fmt(sum.sQ)} 個）` : ''].filter(Boolean).join('、');
-    const notes = [modeB ? `${modeB === dates.length ? '全部' : `其中 ${modeB} 天`}用全現貨模式（${stockFromDate()} 起）` : '', stockOpen.set ? `期初現貨 ${stockOpen.n} 個品號（${fmt(stockOpen.q)} 個，${from}）` : '', !c.hasConvert ? '這是舊版書籤，' + (c.hasStock ? '沒有帶入半成品轉現貨' : '沒有帶入現貨') + '，請到「入口網站同步」重新拖曳書籤' : '', newProducts.length ? `新增產品 ${newProducts.length} 項` : '', skippedCodes.size ? `略過 ${prefixes.join('、')} 以外的品號 ${skippedCodes.size} 個` : '', before.length ? `起算日 ${from} 以前的 ${before.length} 天沒有匯入` : '', !okP ? '你沒有生產權限，生產數字沒有存' : '', !okS ? '你沒有出貨權限，出貨數字沒有存' : '', c.warn ? '注意：' + c.warn : ''].filter(Boolean).join('；');
+    const notes = [modeB ? `${modeB === dates.length ? '全部' : `其中 ${modeB} 天`}用全現貨模式（${stockFromDate()} 起）` : '', stockOpen.set ? `期初現貨 ${stockOpen.n} 個品號（${fmt(stockOpen.q)} 個，${from}）` : '', !c.hasConvert ? '這是舊版書籤，' + (c.hasStock ? '沒有帶入半成品轉現貨' : '沒有帶入現貨') + '，請到「入口網站同步」重新拖曳書籤' : '', newProducts.length ? `新增產品 ${newProducts.length} 項` : '', skippedCodes.size ? `略過 ${prefixes.join('、')} 以外的品號 ${skippedCodes.size} 個` : '', excludedCodes.size ? `略過${EXCLUDE_WORDS.join('、')} ${excludedCodes.size} 個品號` : '', before.length ? `起算日 ${from} 以前的 ${before.length} 天沒有匯入` : '', !okP ? '你沒有生產權限，生產數字沒有存' : '', !okS ? '你沒有出貨權限，出貨數字沒有存' : '', c.warn ? '注意：' + c.warn : ''].filter(Boolean).join('；');
     toast(`已同步入口網站 ${range}：${parts}${changed ? '' : '（數字都沒變）'}${notes ? '。' + notes : ''}`, false, 10000);
     go('portal');
   } catch (e) { toast('入口網站資料讀取失敗：' + e.message, true, 8000); }
