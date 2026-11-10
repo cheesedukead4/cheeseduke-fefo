@@ -58,6 +58,9 @@ body:not(.can-produce) .need-produce,body:not(.can-ship) .need-ship,body:not(.ca
 .data-table td.exp-cell{white-space:normal;min-width:280px}
 .exp-chips{display:flex;flex-wrap:wrap;gap:6px}
 .exp-chip{font-weight:600}
+.linkchip{border:0;cursor:pointer;text-decoration:underline}
+.modal-card.wide{max-width:1000px}
+.modal-card.wide .data-table td,.modal-card.wide .data-table th{padding:9px 11px}
 .exp-chip .mono{font-weight:700}
 
 /* 登入畫面（auth.js） */
