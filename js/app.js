@@ -100,7 +100,9 @@ function sanitizeRec(r) {
   if (r.type === 'shipment') return isDate(r.date) ? { ...base, type: 'shipment', date: r.date, orderNo: clean(r.orderNo) } : null;
   if (r.type === 'convert') return isDate(r.date) ? { ...base, type: 'convert', date: r.date } : null; // 半成品轉現貨
   if (!isDate(r.manufactureDate) || !isDate(r.expiryDate)) return null;
-  const lot = { ...base, batch: clean(r.batch) || '—', manufactureDate: r.manufactureDate, expiryDate: r.expiryDate, ...(r.pool === 'stock' ? { pool: 'stock' } : {}) };
+  // 還沒轉現貨的半成品沒有批號，只看製作日期與有效日期；現貨（期初現貨、生產轉現貨、全現貨模式的當天生產）才有批號
+  const semi = r.pool !== 'stock' && !(r.type === 'production' && isStockModeDay(r.date));
+  const lot = { ...base, batch: semi ? '—' : clean(r.batch) || '—', manufactureDate: r.manufactureDate, expiryDate: r.expiryDate, ...(r.pool === 'stock' ? { pool: 'stock' } : {}) };
   if (r.type === 'opening') return isDate(r.entryDate) ? { ...lot, type: 'opening', entryDate: r.entryDate } : null;
   if (r.type === 'production') return isDate(r.date) ? { ...lot, type: 'production', date: r.date } : null;
   return null;
@@ -203,7 +205,7 @@ function calculateLedger(asOf = '9999-12-31', st = data) {
         if (need <= 1e-7) break;
         const q = clampQty(Math.min(need, lot.remaining));
         lot.remaining = clampQty(lot.remaining - q); lot.used = clampQty(lot.used + q); lot.converted = clampQty(lot.converted + q); need = clampQty(need - q);
-        addLot({ id: x.id + '#' + lot.id, source: 'convert', pool: 'stock', product: lot.product, batch: lot.batch, manufactureDate: lot.manufactureDate, expiryDate: lot.expiryDate, entryDate: e.date, quantity: q, used: 0, shipped: 0, converted: 0, remaining: q, seq: x.seq || 0, unit: lot.unit, fromLot: lot.id });
+        addLot({ id: x.id + '#' + lot.id, source: 'convert', pool: 'stock', product: lot.product, batch: lot.batch !== '—' ? lot.batch : makeBatch(lot.product, lot.manufactureDate) || '—', manufactureDate: lot.manufactureDate, expiryDate: lot.expiryDate, entryDate: e.date, quantity: q, used: 0, shipped: 0, converted: 0, remaining: q, seq: x.seq || 0, unit: lot.unit, fromLot: lot.id });
       }
       converts.set(x.id, { required, moved: clampQty(required - need), shortage: clampQty(need) });
       continue;
@@ -322,9 +324,10 @@ function chipCell(recs, chip, kind, product) {
 }
 const detailBtn = (kind, product) => td(`<button type="button" class="btn small" data-action="detail-${kind}" data-id="${esc(product)}">明細${(kind !== 'opening' || !can(permFor(kind))) ? '' : '／修改'}</button>`);
 const unitOf = r => esc(getUnit(r.product));
-const openingChip = r => `<span class="pill ${r.pool === 'stock' ? 'future' : 'other'} exp-chip" title="${esc(`入帳 ${r.entryDate}｜製作 ${r.manufactureDate}｜效期 ${expShow(r.expiryDate)}${r.note ? '｜' + r.note : ''}${r.by ? '｜' + r.by : ''}`)}"><span class="mono">${esc(r.batch)}</span> ${r.expiryDate === NO_EXPIRY ? '' : '效期 ' + esc(md(r.expiryDate)) + ' '}${esc(fmt(r.quantity))} ${unitOf(r)}</span>`;
+const lotLabel = r => r.batch && r.batch !== '—' ? r.batch : `製 ${md(r.manufactureDate)}`;
+const openingChip = r => `<span class="pill ${r.pool === 'stock' ? 'future' : 'other'} exp-chip" title="${esc(`入帳 ${r.entryDate}｜製作 ${r.manufactureDate}｜效期 ${expShow(r.expiryDate)}${r.note ? '｜' + r.note : ''}${r.by ? '｜' + r.by : ''}`)}"><span class="mono">${esc(lotLabel(r))}</span> ${r.expiryDate === NO_EXPIRY ? '' : '效期 ' + esc(md(r.expiryDate)) + ' '}${esc(fmt(r.quantity))} ${unitOf(r)}</span>`;
 const prodKind = r => r.pool === 'stock' ? '生產轉現貨' : /當天生產/.test(r.note) ? '當天生產' : /半成品入庫/.test(r.note) ? '半成品入庫' : '';
-const prodChip = r => `<span class="pill ${r.pool === 'stock' ? 'future' : 'ok'} exp-chip" title="${esc(`${r.date}｜批號 ${r.batch}｜製作 ${r.manufactureDate}｜效期 ${expShow(r.expiryDate)}${r.note ? '｜' + r.note : ''}${r.by ? '｜' + r.by : ''}`)}"><span class="mono">${esc(md(r.date))}</span> ${esc(fmt(r.quantity))} ${unitOf(r)}${prodKind(r) === '生產轉現貨' ? '（轉現貨）' : ''}</span>`;
+const prodChip = r => `<span class="pill ${r.pool === 'stock' ? 'future' : 'ok'} exp-chip" title="${esc(`${r.date}${r.batch !== '—' ? '｜批號 ' + r.batch : '｜半成品（轉現貨後才有批號）'}｜製作 ${r.manufactureDate}｜效期 ${expShow(r.expiryDate)}${r.note ? '｜' + r.note : ''}${r.by ? '｜' + r.by : ''}`)}"><span class="mono">${esc(md(r.date))}</span> ${esc(fmt(r.quantity))} ${unitOf(r)}${prodKind(r) === '生產轉現貨' ? '（轉現貨）' : ''}</span>`;
 function shipChip(r, ledger) { const s = ledger.shipments.get(r.id) || { shipped: 0, shortage: r.quantity }; return `<span class="pill ${s.shortage ? 'bad' : 'other'} exp-chip" title="${esc(`${r.date}｜${r.orderNo || '—'}｜需求 ${fmt(r.quantity)}｜實際出貨 ${fmt(s.shipped)}${s.shortage ? '｜缺 ' + fmt(s.shortage) : ''}${r.note ? '｜' + r.note : ''}`)}"><span class="mono">${esc(md(r.date))}</span> ${esc(fmt(r.quantity))} ${unitOf(r)}${s.shortage ? `（缺 ${esc(fmt(s.shortage))}）` : ''}</span>`; }
 function shipTotals(recs, ledger) { let req = 0, shipped = 0, short = 0; for (const r of recs) { const s = ledger.shipments.get(r.id) || { shipped: 0, shortage: r.quantity }; req += r.quantity; shipped += s.shipped; short += s.shortage; } return { req: clampQty(req), shipped: clampQty(shipped), short: clampQty(short) }; }
 function renderOpening() {
@@ -392,7 +395,7 @@ function byProductExpiry(groups) {
 function expChip(e, unit, today) {
   const s = expiryStatus(e.expiry, e.total, today), split = !isStockModeDay(today);
   const part = split ? (e.stock && e.semi ? `（現貨 ${fmt(e.stock)}・半成品 ${fmt(e.semi)}）` : e.stock ? '（現貨）' : '（半成品）') : '';
-  return `<span class="pill ${s.cls} exp-chip" title="${esc(`${expShow(e.expiry)}｜${s.label}｜批號 ${[...e.batches].join('、')}`)}"><span class="mono">${esc(e.expiry === NO_EXPIRY ? '期初現貨' : e.expiry)}</span> ${esc(fmt(e.total))} ${esc(unit)}${esc(part)}</span>`;
+  return `<span class="pill ${s.cls} exp-chip" title="${esc(`${expShow(e.expiry)}｜${s.label}${[...e.batches].some(b => b !== '—') ? '｜批號 ' + [...e.batches].filter(b => b !== '—').join('、') : ''}`)}"><span class="mono">${esc(e.expiry === NO_EXPIRY ? '期初現貨' : e.expiry)}</span> ${esc(fmt(e.total))} ${esc(unit)}${esc(part)}</span>`;
 }
 function renderBatches(groups, today) {
   const split = !isStockModeDay(today), byP = byProductExpiry(groups);
@@ -421,7 +424,7 @@ function renderAllocations(ledger) {
   const days = new Map(); // 品號|日期 → { product, date, parts: [], short }
   for (const x of all) { const k = x.product + '\u0000' + x.date; if (!days.has(k)) days.set(k, { product: x.product, date: x.date, seq: 0, parts: [], short: 0, orders: new Set(), text: '' }); const d = days.get(k); if (x.orderNo) d.orders.add(x.orderNo); if (x.kind === 'shortage') d.short = clampQty(d.short + x.quantity); else d.parts.push(x); d.text += ` ${x.batch} ${x.manufactureDate} ${x.orderNo}`; }
   const groups = groupByProduct([...days.values()], $('allocationFilter').value, ['date', 'text']);
-  const chip = d => { const agg = new Map(); for (const p of d.parts) { const k = p.batch + '|' + p.pool; agg.set(k, { batch: p.batch, pool: p.pool, q: clampQty((agg.get(k)?.q || 0) + p.quantity), exp: p.expiryDate }); } const txt = [...agg.values()].map(a => `${a.batch}${a.pool === '現貨' ? '現貨' : '半成品'}×${fmt(a.q)}`).join('、'); return `<span class="pill ${d.short ? 'bad' : 'other'} exp-chip" title="${esc(`${d.date}｜${[...d.orders].join('、') || '—'}｜${[...agg.values()].map(a => `${a.batch}（${a.pool}，效期 ${expShow(a.exp)}）×${fmt(a.q)}`).join('、')}${d.short ? '｜缺 ' + fmt(d.short) : ''}`)}"><span class="mono">${esc(md(d.date))}</span> ${esc(txt || '—')}${d.short ? `（缺 ${esc(fmt(d.short))}）` : ''}</span>`; };
+  const chip = d => { const agg = new Map(); for (const p of d.parts) { const lab = lotLabel(p), k = lab + '|' + p.pool; agg.set(k, { batch: lab, pool: p.pool, q: clampQty((agg.get(k)?.q || 0) + p.quantity), exp: p.expiryDate }); } const txt = [...agg.values()].map(a => `${a.batch}${a.pool === '現貨' ? '現貨' : '半成品'}×${fmt(a.q)}`).join('、'); return `<span class="pill ${d.short ? 'bad' : 'other'} exp-chip" title="${esc(`${d.date}｜${[...d.orders].join('、') || '—'}｜${[...agg.values()].map(a => `${a.batch}（${a.pool}，效期 ${expShow(a.exp)}）×${fmt(a.q)}`).join('、')}${d.short ? '｜缺 ' + fmt(d.short) : ''}`)}"><span class="mono">${esc(md(d.date))}</span> ${esc(txt || '—')}${d.short ? `（缺 ${esc(fmt(d.short))}）` : ''}</span>`; };
   $('allocationCount').textContent = `共 ${groups.length} 項產品、${all.length} 筆扣批／缺口明細；每個品號一列，每天一個標籤（紅＝有缺口），點「明細」看每一筆`;
   $('allocationTable').innerHTML = table(['產品', '扣批（日期新到舊：批號、現貨／半成品 × 數量）', '扣貨合計#', '缺口#', '明細'], groups.map(g => { const q = clampQty(g.recs.reduce((s, d) => s + d.parts.reduce((t, p) => t + p.quantity, 0), 0)), sh = clampQty(g.recs.reduce((s, d) => s + d.short, 0)); return `<tr>${td(`<strong>${esc(g.product)}</strong>`)}${chipCell(g.recs, chip, 'allocation', g.product)}<td class="num">${fmt(q)} ${esc(getUnit(g.product))}</td><td class="num">${sh ? badge(fmt(sh), 'bad') : '—'}</td>${detailBtn('allocation', g.product)}</tr>`; }), '尚無出貨扣批紀錄');
 }
@@ -470,8 +473,8 @@ function autoExpiry(prefix) { const m = $(`${prefix}Mfg`).value, day = Number($(
 function productDefaults(prefix) { const p = getProduct($(`${prefix}Product`).value); if (p && !p.virtual) { $(`${prefix}Unit`).value = p.unit; $(`${prefix}Shelf`).value = p.shelfDays; } else { $(`${prefix}Shelf`).value = data.settings.defaultShelf; } autoExpiry(prefix); }
 function inputPositive(id) { const v = Number($(id).value); if (!Number.isFinite(v) || !(v > 0) || Math.abs(Math.round(v * 1000) - v * 1000) > 1e-7) throw Error('數量必須大於 0，最多 3 位小數'); return v; }
 function baseRow(prefix, dateKey) {
-  const name = clean($(`${prefix}Product`).value), unit = clean($(`${prefix}Unit`).value), batch = clean($(`${prefix}Batch`).value), manufactureDate = $(`${prefix}Mfg`).value, expiryDate = $(`${prefix}Expiry`).value, entryDate = $(dateKey).value;
-  if (!name || !unit || !batch) throw Error('請填寫產品、單位及批號');
+  const name = clean($(`${prefix}Product`).value), unit = clean($(`${prefix}Unit`).value), batch = '—', manufactureDate = $(`${prefix}Mfg`).value, expiryDate = $(`${prefix}Expiry`).value, entryDate = $(dateKey).value;
+  if (!name || !unit) throw Error('請填寫產品及單位');
   if (!isDate(manufactureDate) || !isDate(expiryDate) || !isDate(entryDate)) throw Error('請填寫有效的日期');
   if (manufactureDate > entryDate) throw Error('製作日期不可晚於入庫日期');
   if (expiryDate < manufactureDate) throw Error('有效日期不可早於製作日期');
@@ -497,7 +500,7 @@ function resetOpening() { $('openingForm').reset(); $('oMfg').value = TODAY(); $
 const resetForms = () => { resetOpening(); SHOPS.forEach(x => resetShopForm(x.id)); };
 const smooth = () => window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches ? 'auto' : 'smooth';
 function populateEdit(type, id) {
-  if (type === 'opening') { const x = data.opening.find(x => x.id === id); if (!x) return; editOpening = id; for (const [f, v] of Object.entries({ oProduct: x.product, oUnit: getUnit(x.product), oBatch: x.batch, oQty: x.quantity, oMfg: x.manufactureDate, oEntry: x.entryDate, oExpiry: x.expiryDate, oNote: x.note || '' })) $(f).value = v; $('oShelf').value = getProduct(x.product)?.shelfDays ?? data.settings.defaultShelf; $('openingFormTitle').textContent = '修改期初庫存'; $('oSubmit').textContent = '儲存修改'; $('oCancel').classList.remove('hide'); go('opening'); setTimeout(() => $('openingForm').scrollIntoView({ block: 'center', behavior: smooth() }), 30); return; }
+  if (type === 'opening') { const x = data.opening.find(x => x.id === id); if (!x) return; editOpening = id; for (const [f, v] of Object.entries({ oProduct: x.product, oUnit: getUnit(x.product), oQty: x.quantity, oMfg: x.manufactureDate, oEntry: x.entryDate, oExpiry: x.expiryDate, oNote: x.note || '' })) $(f).value = v; $('oShelf').value = getProduct(x.product)?.shelfDays ?? data.settings.defaultShelf; $('openingFormTitle').textContent = '修改期初庫存'; $('oSubmit').textContent = '儲存修改'; $('oCancel').classList.remove('hide'); go('opening'); setTimeout(() => $('openingForm').scrollIntoView({ block: 'center', behavior: smooth() }), 30); return; }
 }
 
 /* ---------- 對話框 ---------- */
@@ -754,7 +757,7 @@ function renderBatchRule(today) {
   // 2. 某一天的生產批號
   const ld = $('brListDate').value, prods = data.movements.filter(r => r.type === 'production' && r.date === ld).sort((a, b) => productOrder(a.product, b.product) || cmp(a.batch, b.batch));
   $('brListCount').textContent = isDate(ld) ? `${ld} 共 ${prods.length} 筆生產（入口網站同步後自動帶入批號與有效日期）` : '請選日期';
-  $('brList').innerHTML = table(['產品', '類別', '數量#', '批號', '製作日期', '有效日期'], prods.map(r => `<tr>${td(`<strong>${esc(r.product)}</strong>`)}${td(esc(prodKind(r) || '生產'))}<td class="num">${fmt(r.quantity)} ${esc(getUnit(r.product))}</td>${td(`<span class="mono">${esc(r.batch)}</span>${r.batch === makeBatch(r.product, r.date) ? '' : ' ' + badge('舊格式', 'other')}`)}${tdm(r.manufactureDate)}${tdm(expShow(r.expiryDate))}</tr>`), '這天沒有生產紀錄');
+  $('brList').innerHTML = table(['產品', '類別', '數量#', '批號', '製作日期', '有效日期'], prods.map(r => `<tr>${td(`<strong>${esc(r.product)}</strong>`)}${td(esc(prodKind(r) || '生產'))}<td class="num">${fmt(r.quantity)} ${esc(getUnit(r.product))}</td>${td(r.batch === '—' ? `— ${badge('半成品', 'other')}` : `<span class="mono">${esc(r.batch)}</span>${r.batch === makeBatch(r.product, r.date) ? '' : ' ' + badge('舊格式', 'other')}`)}${tdm(r.manufactureDate)}${tdm(expShow(r.expiryDate))}</tr>`), '這天沒有生產紀錄');
   // 3. 品號碼對照
   const codes = customCodes(), list = searchable(byProductName(data.products.filter(x => !x.virtual)), $('brFilter').value, ['name']);
   $('brCodeCount').textContent = `共 ${list.length} 項產品；品號碼預設取品號（CK-08 → CK08），需要時可自訂`;
@@ -908,7 +911,7 @@ function applyPortalPending() {
         if (okP && r.inQ > 0) {
           const p = productFor(r.code, r.name), id = `pt-p-${ds}-${r.code}`, old = existing.get(id);
           want.add(id); sum.pN++; sum.pQ += r.inQ;
-          const rec = old ? { ...old, product: p.name, quantity: r.inQ, batch: batchFor(p.name, ds), note: '入口網站：半成品入庫' } : { id, type: 'production', seq: nextSeq(), date: ds, product: p.name, batch: batchFor(p.name, ds), manufactureDate: ds, expiryDate: addDays(ds, p.shelfDays), quantity: r.inQ, note: '入口網站：半成品入庫', by: who, at };
+          const rec = old ? { ...old, product: p.name, quantity: r.inQ, batch: '—', note: '入口網站：半成品入庫' } : { id, type: 'production', seq: nextSeq(), date: ds, product: p.name, batch: '—', manufactureDate: ds, expiryDate: addDays(ds, p.shelfDays), quantity: r.inQ, note: '入口網站：半成品入庫', by: who, at };
           if (!old || old.quantity !== rec.quantity || old.product !== rec.product || old.note !== rec.note || old.batch !== rec.batch) saves.push(rec);
         }
         if (okS && r.outQ > 0) {

@@ -61,7 +61,7 @@
       <p class="welcome-intro">資料存在雲端，名單內的同事打開 App 都會看到同一份庫存；任何人登錄後，其他人的畫面約 30 秒內自動更新。目前還沒有任何紀錄，可以從下面的方式開始：</p>
       <div class="welcome-grid">
         <div class="welcome-item need-admin"><b>從舊版搬資料</b><p>在舊的網頁版或離線版按「備份資料」下載 JSON，再到這裡匯入。期初庫存、生產、出貨與產品設定會一起搬過來。</p><button type="button" class="btn primary small" data-action="import">↥ 匯入 JSON 備份</button></div>
-        <div class="welcome-item need-produce"><b>從頭建立</b><p>先到「期初庫存建檔」登錄現有的批號、製作日期與有效日期，之後每天登錄生產與出貨。</p><a class="btn small" href="#opening" data-view="opening">建立期初庫存</a></div>
+        <div class="welcome-item need-produce"><b>從頭建立</b><p>先到「期初庫存建檔」登錄現有庫存的製作日期與有效日期，之後每天登錄生產與出貨。</p><a class="btn small" href="#opening" data-view="opening">建立期初庫存</a></div>
         <div class="welcome-item need-admin"><b>先看示範</b><p>載入兩個範例產品，試試同批不同製作日期的 FEFO 扣批。之後可在「資料與設定」清除。</p><button type="button" class="btn small" data-action="demo">載入示範資料</button></div>
       </div>
     </div></div>
@@ -76,11 +76,10 @@
   </section>
 
   <section id="opening" class="section">
-    <p class="section-intro">登錄開始使用系統前已經有的庫存。同一產品、同一批號可有多筆不同製作日期，每筆都會獨立追蹤效期。</p>
+    <p class="section-intro">登錄開始使用系統前已經有的半成品庫存：只要填製作日期與有效日期，不用批號（轉成現貨時才依製作日期產生批號）。同一產品可有多筆不同製作日期，每筆都會獨立追蹤效期。</p>
     <div class="panel form-area need-produce"><div class="panel-head"><div><h2 id="openingFormTitle">新增期初庫存</h2><p>入帳日決定這批庫存從哪一天開始可以被出貨扣除。</p></div></div><div class="panel-body"><form id="openingForm" class="form-grid" novalidate>
       <div class="field"><label for="oProduct">產品名稱 *</label><input id="oProduct" list="productNames" required placeholder="輸入品號或品名" maxlength="80" autocomplete="off"></div>
       <div class="field"><label for="oUnit">單位 *</label><input id="oUnit" required value="個" maxlength="12" placeholder="個／盒／公斤"></div>
-      <div class="field"><label for="oBatch">批號 *</label><input id="oBatch" required placeholder="例如：20261109" maxlength="60" autocomplete="off"></div>
       <div class="field"><label for="oQty">原始庫存數量 *</label><input id="oQty" type="number" inputmode="decimal" required step="0.001" min="0.001" placeholder="0"></div>
       <div class="field"><label for="oMfg">製作日期 *</label><input id="oMfg" type="date" required></div>
       <div class="field"><label for="oEntry">庫存入帳日期 *</label><input id="oEntry" type="date" required></div>
@@ -125,7 +124,7 @@
   </section>
 
   <section id="batchrule" class="section">
-    <p class="section-intro">批號 8 碼：第 1、2、7、8 碼＝<strong>品號碼</strong>，第 3 碼＝<strong>月碼</strong>，第 4 碼＝<strong>年碼</strong>，第 5、6 碼＝<strong>日期碼</strong>。例如 CK-08 在 2026-11-11 生產 → <span class="mono">CKAS1B08</span>。每天在入口網站同步的生產，會自動依生產日期帶入批號，有效日期＝生產日期＋保存天數。</p>
+    <p class="section-intro">批號 8 碼：第 1、2、7、8 碼＝<strong>品號碼</strong>，第 3 碼＝<strong>月碼</strong>，第 4 碼＝<strong>年碼</strong>，第 5、6 碼＝<strong>日期碼</strong>。例如 CK-08 在 2026-11-11 生產 → <span class="mono">CKAS1B08</span>。有效日期＝製作日期＋保存天數。<strong>還沒轉現貨的半成品不給批號</strong>，只看製作日期與有效日期；生產轉現貨會依生產日期帶入批號，半成品轉成現貨時依它的製作日期產生批號。</p>
     <div class="panel-split">
       <div class="panel"><div class="panel-head"><div><h2>查批號</h2><p>選產品和生產日期，馬上產生批號與有效日期</p></div></div><div class="panel-body"><div class="form-grid br-form">
         <div class="field span2"><label for="brProduct">產品</label><input id="brProduct" list="productNames" placeholder="輸入品號或品名，從清單選擇" maxlength="80" autocomplete="off"></div>
