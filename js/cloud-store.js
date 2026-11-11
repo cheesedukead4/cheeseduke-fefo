@@ -5,6 +5,7 @@
  *      products        產品（名稱、單位、保存天數、低庫存警戒量）
  *      settings        效期預警設定（一筆，id = main）
  *      opening_YYYYMM  期初庫存，依「入帳日期」（entryDate）的年月分檔
+ *      shop_YYYYMM     門市進貨、銷售、報廢（shop = a11 | jz | dq），依日期的年月分檔
  *      moves_YYYYMM    每日生產與出貨（type = production | shipment），依日期的年月分檔，
  *                      避免單一檔案越來越大、每次修改都要上傳全部歷史
  *  - 每類有雲端版本號；上傳時帶「我是根據哪一版改的」，有人搶先更新就先下載，以單筆（id）為單位三方合併後再上傳
@@ -18,9 +19,9 @@
   var STORE = 'kv';
   var POLL_MS = 30000;
   var PUSH_DELAY_MS = 800;
-  var LABELS = { products: '產品', settings: '效期設定', opening: '期初庫存', moves: '生產與出貨紀錄' };
-  var MONTHLY = ['opening', 'moves'];   // 依日期年月分檔的種類（資料要有 date 或 entryDate 欄位）
-  var KEY_RE = /^(products|settings|(opening|moves)_\d{6})$/;
+  var LABELS = { products: '產品', settings: '效期設定', opening: '期初庫存', moves: '生產與出貨紀錄', shop: '門市庫存' };
+  var MONTHLY = ['opening', 'moves', 'shop'];   // 依日期年月分檔的種類（資料要有 date 或 entryDate 欄位）
+  var KEY_RE = /^(products|settings|(opening|moves|shop)_\d{6})$/;
 
   var parts = Object.create(null);   // 類別 -> JSON 字串（目前本機值，陣列）
   var bases = Object.create(null);   // 類別 -> 上次與雲端一致時的 JSON 字串（僅本機有未上傳修改時保存）
@@ -33,7 +34,7 @@
   var listeners = [];
   var idb = null;
 
-  function kindOf(key) { var m = /^(opening|moves)_\d{6}$/.exec(key); return m ? m[1] : key; }
+  function kindOf(key) { var m = /^(opening|moves|shop)_\d{6}$/.exec(key); return m ? m[1] : key; }
   function label(key) {
     var k = kindOf(key);
     if (MONTHLY.indexOf(k) >= 0) { var ym = key.slice(-6); return LABELS[k] + '（' + ym.slice(0, 4) + '/' + ym.slice(4) + '）'; }

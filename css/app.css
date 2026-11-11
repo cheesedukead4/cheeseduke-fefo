@@ -48,7 +48,7 @@ h1,h2,h3{text-wrap:balance}
 .mono{font-family:var(--font-mono);font-size:.94em;letter-spacing:.01em}
 
 /* 權限：沒有權限的人看不到對應的按鈕與表單 */
-body:not(.can-produce) .need-produce,body:not(.can-ship) .need-ship,body:not(.can-setting) .need-setting,body:not(.is-admin) .need-admin,body:not(.can-portal) .need-portal{display:none!important}
+body:not(.can-produce) .need-produce,body:not(.can-ship) .need-ship,body:not(.can-setting) .need-setting,body:not(.is-admin) .need-admin,body:not(.can-portal) .need-portal,body:not(.can-shop_a11) .need-shop_a11,body:not(.can-shop_jz) .need-shop_jz,body:not(.can-shop_dq) .need-shop_dq{display:none!important}
 .bm-btn{margin:6px 0;cursor:grab}
 .seg{display:inline-flex;border:1px solid var(--line);border-radius:8px;overflow:hidden;background:var(--surface)}
 .seg button{border:0;background:transparent;padding:6px 11px;font-size:12px;font-weight:700;color:var(--muted);border-right:1px solid var(--line)}
