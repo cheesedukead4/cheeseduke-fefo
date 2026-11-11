@@ -252,6 +252,7 @@ const manageCol = type => can(permFor(type)) ? ['管理'] : [];
 const manageCell = (kind, id) => String(id).startsWith('pt-') ? (can(permFor(kind)) ? td('<span class="pill other" title="入口網站同步的數字，要修改請在入口網站改後再同步">入口網站</span>') : '') : can(permFor(kind)) ? td(`<div class="segment">${kind === 'opening' ? `<button type="button" class="btn small" data-action="edit-${kind}" data-id="${esc(id)}">修改</button>` : ''}<button type="button" class="btn small danger" data-action="delete-${kind}" data-id="${esc(id)}">刪除</button></div>`) : '';
 
 const VIEWS = { dashboard: ['營運總覽', '每日生產、出貨及批次有效日期，即時統整。'], opening: ['期初庫存建檔', '原始庫存按製作日期分開管理，不需擔心同批不同效期。'], production: ['每日生產紀錄', '入口網站同步帶入的每日生產，自動增加可出貨批次庫存。'], shipment: ['每日出貨紀錄', '入口網站同步帶入的實際揀貨，自動從有效期最近的庫存開始扣除。'], portal: ['入口網站同步', '從入口網站總表帶入每日半成品入庫（生產）與實際揀貨（出貨）。'], batches: ['批次庫存與效期', '依製作日期和有效日期追蹤每一批剩餘量。'], allocations: ['出貨扣批明細', '每張出貨單實際扣除了哪些製作日期，一目了然。'], products: ['產品庫存總表', '總庫存、近效期及過期量依產品清楚呈現。'], manage: ['資料與設定', '備份、效期預警及產品基本設定。'], users: ['人員與權限', '管理誰可以登入，以及每個人能做的事。'] };
+VIEWS.batchrule = ['批號產生', '依批號規則，每天生產的自動帶入批號與有效日期。'];
 for (const x of SHOPS) VIEWS['shop-' + x.id] = [`${x.name}門市庫存`, `${x.name}門市的進貨、銷售、報廢與有效日期，先到期先出。`];
 function showView(view) {
   if (!VIEWS[view] || (view === 'users' && !isAdmin()) || (view === 'portal' && window.FEAuth && FEAuth.user() && !canPortal())) { view = 'dashboard'; if (location.hash && location.hash !== '#dashboard') try { history.replaceState(null, '', '#dashboard'); } catch (e) {} }
@@ -268,7 +269,7 @@ let renderQueued = false;
 function scheduleRender() { if (renderQueued) return; renderQueued = true; setTimeout(() => { renderQueued = false; render(); }, 0); }
 function render() {
   const today = TODAY(), current = calculateLedger(today), full = calculateLedger(), groups = groupLots(current), prod = productSummary(current, today);
-  renderDashboard(today, current, groups, prod); renderOpening(); renderProduction(); renderShipments(full); renderBatches(groups, today); renderAllocations(full); renderProducts(prod); renderSettings(); renderPortal(); renderShops(today);
+  renderDashboard(today, current, groups, prod); renderOpening(); renderProduction(); renderShipments(full); renderBatches(groups, today); renderAllocations(full); renderProducts(prod); renderSettings(); renderPortal(); renderShops(today); renderBatchRule(today);
   $('productNames').innerHTML = byProductName(data.products).map(p => `<option value="${esc(p.name)}"></option>`).join('');
   const empty = !data.opening.length && !data.movements.length;
   $('welcome').hidden = loading() || !empty || !(isAdmin() || can('produce'));
@@ -718,6 +719,68 @@ function saveShop(e, sid) { e.preventDefault(); if (!can(shopPerm(sid))) return;
   toast(o && o.short ? `已登錄${SHOP_TYPES[type]}：扣 ${fmt(o.done)}，缺 ${fmt(o.short)}（庫存不夠${type === 'sale' ? '，或剩下的已過期' : ''}）` : `已登錄${shopName(sid)}門市${SHOP_TYPES[type]} ${fmt(quantity)} ${getUnit(product)}`, !!(o && o.short), o && o.short ? 7000 : 4200);
 }); }
 
+/* ---------- 批號產生（依「活頁簿1.xlsx」的批號規則） ----------
+   批號 8 碼：第 1、2、7、8 碼＝品號碼；第 3 碼＝月碼；第 4 碼＝年碼；第 5、6 碼＝日期碼
+   例：CK-08 在 2026-11-11 生產 → 品號碼 CK08、月碼 A、年碼 S、日期碼 1B → CKAS1B08
+   品號碼預設取品號第一段（CK-08 → CK＋08），可在「批號產生」頁逐項自訂（存在 settings 'batch'.codes，以品號為 key） */
+const MONTH_CODES = ['1', '2', '3', '4', '5', '6', '7', '8', '9', '0', 'A', 'B'];
+const YEAR_BASE = 2024, YEAR_CODES = 'QRSTUVWXYZ'; // 2024＝Q … 2033＝Z
+const monthCode = m => MONTH_CODES[m - 1] || '';
+const yearCode = y => YEAR_CODES[y - YEAR_BASE] || '';
+const dayCode = d => d >= 1 && d <= 31 ? String(d % 10) + (d < 10 ? String(d) : String.fromCharCode(65 + d - 10)) : '';
+const batchMeta = () => FEStore.get('settings', 'batch') || {};
+const customCodes = () => { const c = batchMeta().codes; return c && typeof c === 'object' ? c : {}; };
+const BCODE_RE = /^[A-Z0-9]{4}$/;
+// 自動品號碼：品號第一段「英文 2 碼－數字 1～2 碼」→ 英文＋兩位數字（CK-08 → CK08、KA-1 → KA01）
+function autoProductCode(name) { const m = /^([A-Za-z]{2})-?(\d{1,2})(?![\d])/.exec(productCodeOf(name).split('|')[0]); return m ? (m[1] + m[2].padStart(2, '0')).toUpperCase() : ''; }
+function productBatchCode(name) { const c = customCodes()[productCodeOf(name)]; return BCODE_RE.test(c || '') ? c : autoProductCode(name); }
+// 產生批號；品號碼或日期不能編碼時回傳 ''
+function makeBatch(name, date) {
+  if (!isDate(date)) return '';
+  const pc = productBatchCode(name), [y, m, d] = date.split('-').map(Number), mc = monthCode(m), yc = yearCode(y), dc = dayCode(d);
+  return pc && mc && yc && dc ? pc.slice(0, 2) + mc + yc + dc + pc.slice(2) : '';
+}
+const batchFor = (name, date) => makeBatch(name, date) || String(date).replace(/-/g, '');
+function renderBatchRule(today) {
+  for (const id of ['brDate', 'brListDate']) if (!$(id).value) $(id).value = today;
+  // 1. 查批號
+  const name = clean($('brProduct').value), date = $('brDate').value, p = getProduct(name), box = $('brResult');
+  if (!name || !p || !isDate(date)) box.innerHTML = `<div class="empty">${name && !p ? '找不到這個產品，請從清單選擇（可輸入品號或品名）' : '選產品和生產日期，就會產生批號與有效日期'}</div>`;
+  else {
+    const b = makeBatch(p.name, date), pc = productBatchCode(p.name), [y, m, d] = date.split('-').map(Number), exp = addDays(date, p.shelfDays);
+    box.innerHTML = b ? `<div class="br-code mono">${esc(b)}</div><div class="br-parts"><span><b class="mono">${esc(pc.slice(0, 2))}</b>品號碼（1-2 碼）</span><span><b class="mono">${esc(monthCode(m))}</b>${m} 月（第 3 碼）</span><span><b class="mono">${esc(yearCode(y))}</b>${y} 年（第 4 碼）</span><span><b class="mono">${esc(dayCode(d))}</b>${d} 日（第 5-6 碼）</span><span><b class="mono">${esc(pc.slice(2))}</b>品號碼（7-8 碼）</span></div><p class="br-exp">有效日期：<strong>${esc(exp)}</strong>（${esc(date)} ＋ 保存 ${fmt(p.shelfDays)} 天）</p>`
+      : `<div class="notice warning">${!pc ? `「${esc(p.name)}」的品號沒辦法自動變成 4 碼品號碼，請在下方「品號碼對照」設定。` : `${y} 年沒有年碼（規則只到 ${YEAR_BASE}～${YEAR_BASE + YEAR_CODES.length - 1} 年），請更新批號規則。`}</div>`;
+  }
+  // 2. 某一天的生產批號
+  const ld = $('brListDate').value, prods = data.movements.filter(r => r.type === 'production' && r.date === ld).sort((a, b) => productOrder(a.product, b.product) || cmp(a.batch, b.batch));
+  $('brListCount').textContent = isDate(ld) ? `${ld} 共 ${prods.length} 筆生產（入口網站同步後自動帶入批號與有效日期）` : '請選日期';
+  $('brList').innerHTML = table(['產品', '類別', '數量#', '批號', '製作日期', '有效日期'], prods.map(r => `<tr>${td(`<strong>${esc(r.product)}</strong>`)}${td(esc(prodKind(r) || '生產'))}<td class="num">${fmt(r.quantity)} ${esc(getUnit(r.product))}</td>${td(`<span class="mono">${esc(r.batch)}</span>${r.batch === makeBatch(r.product, r.date) ? '' : ' ' + badge('舊格式', 'other')}`)}${tdm(r.manufactureDate)}${tdm(expShow(r.expiryDate))}</tr>`), '這天沒有生產紀錄');
+  // 3. 品號碼對照
+  const codes = customCodes(), list = searchable(byProductName(data.products.filter(x => !x.virtual)), $('brFilter').value, ['name']);
+  $('brCodeCount').textContent = `共 ${list.length} 項產品；品號碼預設取品號（CK-08 → CK08），需要時可自訂`;
+  $('brCodes').innerHTML = table(['產品', '品號碼', '來源', `今天（${shortDate(today)}）的批號`, '保存天數#', '今天生產的有效日期', ...(can('setting') ? ['管理'] : [])], list.map(x => {
+    const custom = BCODE_RE.test(codes[productCodeOf(x.name)] || ''), pc = productBatchCode(x.name), b = makeBatch(x.name, today);
+    return `<tr>${td(`<strong>${esc(x.name)}</strong>`)}${td(pc ? `<span class="mono">${esc(pc)}</span>` : badge('無法自動產生', 'bad'))}${td(custom ? badge('自訂', 'future') : badge('自動', 'other'))}${td(b ? `<span class="mono">${esc(b)}</span>` : '—')}<td class="num">${fmt(x.shelfDays)}</td>${tdm(addDays(today, x.shelfDays))}${can('setting') ? td(`<button type="button" class="btn small" data-action="edit-bcode" data-id="${esc(x.name)}">修改</button>`) : ''}</tr>`;
+  }), '沒有產品');
+}
+function renderBatchRefs() {
+  const cell = (k, v) => `<div class="br-ref-cell"><span>${esc(k)}</span><b class="mono">${esc(v)}</b></div>`;
+  $('brRefs').innerHTML = `<div class="br-ref"><h3>月碼（第 3 碼）</h3><div class="br-ref-grid">${MONTH_CODES.map((c, i) => cell(`${i + 1} 月`, c)).join('')}</div></div>`
+    + `<div class="br-ref"><h3>年碼（第 4 碼）</h3><div class="br-ref-grid">${[...YEAR_CODES].map((c, i) => cell(`${YEAR_BASE + i}`, c)).join('')}</div></div>`
+    + `<div class="br-ref"><h3>日期碼（第 5、6 碼）</h3><div class="br-ref-grid">${Array.from({ length: 31 }, (_, i) => cell(`${i + 1} 日`, dayCode(i + 1))).join('')}</div></div>`;
+}
+async function editBatchCode(name) {
+  if (!can('setting')) return;
+  const code = productCodeOf(name), cur = customCodes()[code] || '', auto = autoProductCode(name);
+  const res = await modal({ title: `「${name}」的品號碼`, ok: '儲存',
+    html: `<p class="modal-note">品號碼是批號的第 1、2、7、8 碼，共 4 碼英文或數字。留空＝用自動的${auto ? `「${esc(auto)}」` : '（這個品號沒辦法自動產生，一定要填）'}。同一個品號（${esc(code)}）的產品都會用這個品號碼。</p><div class="field"><label for="bc-code">品號碼</label><input id="bc-code" value="${esc(cur)}" maxlength="4" placeholder="${esc(auto || '例如 CK08')}" autocomplete="off" style="text-transform:uppercase"></div><p class="modal-error" hidden></p>`,
+    collect: b => { const v = clean(b.querySelector('#bc-code').value).toUpperCase(); if (v && !BCODE_RE.test(v)) throw Error('品號碼要剛好 4 碼英文或數字'); return { v }; } });
+  if (!res) return;
+  const meta = batchMeta(), codes = { ...customCodes() };
+  if (res.v && res.v !== auto) codes[code] = res.v; else delete codes[code];
+  act(() => { FEStore.save('settings', { ...meta, id: 'batch', codes }); toast(res.v && res.v !== auto ? `已設定品號碼 ${res.v}；之後同步的生產會用新的批號` : '已改回自動品號碼'); });
+}
+
 /* ---------- 入口網站同步（書籤帶入 半成品入庫＝生產、實際揀貨＝出貨）---------- */
 const PORTAL_URL = 'https://cheeseduke.flowings.app/logistics-console';
 const PORTAL_DAYS = 14;
@@ -817,8 +880,8 @@ function applyPortalPending() {
           if (okP && q > 0) {
             const p = productFor(r.code, r.name), id = `pt-p-${ds}-${r.code}`, old = existing.get(id);
             want.add(id); sum.pN++; sum.pQ += q;
-            const rec = old ? { ...old, product: p.name, quantity: q, note: '入口網站：當天生產（全現貨模式）' } : { id, type: 'production', seq: nextSeq(), date: ds, product: p.name, batch: ds.replace(/-/g, ''), manufactureDate: ds, expiryDate: addDays(ds, p.shelfDays), quantity: q, note: '入口網站：當天生產（全現貨模式）', by: who, at };
-            if (!old || old.quantity !== rec.quantity || old.product !== rec.product || old.note !== rec.note) saves.push(rec);
+            const rec = old ? { ...old, product: p.name, quantity: q, batch: batchFor(p.name, ds), note: '入口網站：當天生產（全現貨模式）' } : { id, type: 'production', seq: nextSeq(), date: ds, product: p.name, batch: batchFor(p.name, ds), manufactureDate: ds, expiryDate: addDays(ds, p.shelfDays), quantity: q, note: '入口網站：當天生產（全現貨模式）', by: who, at };
+            if (!old || old.quantity !== rec.quantity || old.product !== rec.product || old.note !== rec.note || old.batch !== rec.batch) saves.push(rec);
           }
           if (okS && r.outQ > 0) {
             const p = productFor(r.code, r.name), id = `pt-s-${ds}-${r.code}`, old = existing.get(id);
@@ -832,7 +895,7 @@ function applyPortalPending() {
           // 生產轉現貨：當天生產直接做成現貨，製作日＝當天，有效日期＝當天＋保存天數
           const p = productFor(r.code, r.name), id = `pt-q-${ds}-${r.code}`, old = existing.get(id), exp = addDays(ds, p.shelfDays);
           want.add(id); sum.qN++; sum.qQ += r.toStock;
-          const rec = old ? { ...old, product: p.name, quantity: r.toStock, batch: ds.replace(/-/g, ''), expiryDate: old.editBy ? old.expiryDate : exp } : { id, type: 'production', pool: 'stock', seq: nextSeq(), date: ds, product: p.name, batch: ds.replace(/-/g, ''), manufactureDate: ds, expiryDate: exp, quantity: r.toStock, note: '入口網站：生產轉現貨', by: who, at };
+          const rec = old ? { ...old, product: p.name, quantity: r.toStock, batch: batchFor(p.name, ds), expiryDate: old.editBy ? old.expiryDate : exp } : { id, type: 'production', pool: 'stock', seq: nextSeq(), date: ds, product: p.name, batch: batchFor(p.name, ds), manufactureDate: ds, expiryDate: exp, quantity: r.toStock, note: '入口網站：生產轉現貨', by: who, at };
           if (!old || old.quantity !== rec.quantity || old.product !== rec.product || old.batch !== rec.batch || old.expiryDate !== rec.expiryDate) saves.push(rec);
         }
         if (c.hasConvert && okP && r.semiToStock > 0) {
@@ -845,8 +908,8 @@ function applyPortalPending() {
         if (okP && r.inQ > 0) {
           const p = productFor(r.code, r.name), id = `pt-p-${ds}-${r.code}`, old = existing.get(id);
           want.add(id); sum.pN++; sum.pQ += r.inQ;
-          const rec = old ? { ...old, product: p.name, quantity: r.inQ, note: '入口網站：半成品入庫' } : { id, type: 'production', seq: nextSeq(), date: ds, product: p.name, batch: ds.replace(/-/g, ''), manufactureDate: ds, expiryDate: addDays(ds, p.shelfDays), quantity: r.inQ, note: '入口網站：半成品入庫', by: who, at };
-          if (!old || old.quantity !== rec.quantity || old.product !== rec.product || old.note !== rec.note) saves.push(rec);
+          const rec = old ? { ...old, product: p.name, quantity: r.inQ, batch: batchFor(p.name, ds), note: '入口網站：半成品入庫' } : { id, type: 'production', seq: nextSeq(), date: ds, product: p.name, batch: batchFor(p.name, ds), manufactureDate: ds, expiryDate: addDays(ds, p.shelfDays), quantity: r.inQ, note: '入口網站：半成品入庫', by: who, at };
+          if (!old || old.quantity !== rec.quantity || old.product !== rec.product || old.note !== rec.note || old.batch !== rec.batch) saves.push(rec);
         }
         if (okS && r.outQ > 0) {
           const p = productFor(r.code, r.name), id = `pt-s-${ds}-${r.code}`, old = existing.get(id);
@@ -968,6 +1031,7 @@ async function handleAction(el) {
   if (a === 'edit-user') { const u = (U.list || []).find(x => x.email === id); return u && openUserForm(u, true); }
   if (a === 'toggle-user') { const u = (U.list || []).find(x => x.email === id); return u && userCall('userSave', { email: u.email, name: u.name, pages: u.pages, enabled: !u.enabled }, u.enabled ? '已停用，這個人會馬上被登出' : '已啟用'); }
   if (a === 'delete-user') { const u = (U.list || []).find(x => x.email === id); if (!u || !await modal({ title: '刪除這位人員？', html: `<p>${esc(u.name || u.email)}（${esc(u.email)}）會馬上被登出，之後不能再登入。他登錄過的資料會保留。</p>`, ok: '刪除', danger: true })) return; return userCall('userDelete', { email: u.email }, '已刪除'); }
+  if (a === 'edit-bcode') return editBatchCode(id);
   if (a === 'shop-detail') return openShopDetail(el.dataset.shop, id);
   if (a === 'shop-delete') return deleteShopRec(el.dataset.shop, id);
   if (a.startsWith('detail-')) return openDetail(a.slice(7), id);
@@ -997,6 +1061,8 @@ function bind() {
   for (const id of ['openingFilter', 'productionFilter', 'shipmentFilter', 'batchFilter', 'allocationFilter', 'productFilter', 'settingFilter', 'batchLive', 'productLive']) $(id).addEventListener('input', scheduleRender);
   $('batchSeg').addEventListener('click', e => { const b = e.target.closest('[data-bmode]'); if (!b) return; batchMode = b.dataset.bmode; scheduleRender(); });
   $('openingForm').addEventListener('submit', saveOpening);
+  for (const id of ['brProduct', 'brDate', 'brListDate', 'brFilter']) $(id).addEventListener('input', scheduleRender);
+  renderBatchRefs();
   for (const { id } of SHOPS) {
     $('shopForm-' + id).addEventListener('submit', e => saveShop(e, id));
     $('shType-' + id).addEventListener('change', () => shopFormSync(id, true));

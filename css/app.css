@@ -55,6 +55,16 @@ body:not(.can-produce) .need-produce,body:not(.can-ship) .need-ship,body:not(.ca
 .seg button:last-child{border-right:0}
 .seg button:hover{background:var(--surface-hover);color:var(--ink-2)}
 .seg button.on{background:var(--accent);color:var(--on-accent)}
+.br-result{margin-top:14px}
+.br-code{font-size:34px;font-weight:800;letter-spacing:4px;color:var(--ink);margin:4px 0 10px}
+.br-parts{display:flex;flex-wrap:wrap;gap:6px 14px;font-size:12px;color:var(--muted)}
+.br-parts b{display:inline-block;min-width:22px;margin-right:4px;padding:1px 6px;border-radius:6px;background:var(--surface-2);border:1px solid var(--line);color:var(--ink);font-size:13px;text-align:center}
+.br-exp{margin:12px 0 0;font-size:13px;color:var(--ink-2)}
+.br-refs{display:flex;flex-direction:column;gap:12px}
+.br-ref h3{margin:0 0 6px;font-size:12px;color:var(--muted);font-weight:700}
+.br-ref-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(64px,1fr));gap:4px}
+.br-ref-cell{display:flex;justify-content:space-between;gap:4px;border:1px solid var(--line);border-radius:6px;padding:3px 7px;font-size:11px;color:var(--muted)}
+.br-ref-cell b{color:var(--ink);font-size:12px}
 .seg-n{display:inline-block;min-width:18px;margin-left:6px;padding:0 5px;border-radius:9px;background:var(--bad-mark);color:#fff;font-size:11px;font-weight:800;line-height:18px;text-align:center;vertical-align:1px}
 .seg button.on .seg-n{background:#fff;color:var(--bad-fg)}
 .data-table td.exp-cell{white-space:normal;min-width:280px}

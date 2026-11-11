@@ -32,6 +32,7 @@
     <a class="nav-btn" href="#shipment" data-view="shipment"><span class="nav-ico" aria-hidden="true">⇧</span>每日出貨紀錄</a>
     <a class="nav-btn need-portal" href="#portal" data-view="portal"><span class="nav-ico" aria-hidden="true">⟳</span>入口網站同步</a>
     <a class="nav-btn" href="#batches" data-view="batches"><span class="nav-ico" aria-hidden="true">▦</span>批次庫存與效期</a>
+    <a class="nav-btn" href="#batchrule" data-view="batchrule"><span class="nav-ico" aria-hidden="true">#</span>批號產生</a>
     <a class="nav-btn" href="#allocations" data-view="allocations"><span class="nav-ico" aria-hidden="true">≋</span>出貨扣批明細</a>
     <a class="nav-btn" href="#products" data-view="products"><span class="nav-ico" aria-hidden="true">◈</span>產品庫存總表</a>
     <a class="nav-btn" href="#manage" data-view="manage"><span class="nav-ico" aria-hidden="true">⚙</span>資料與設定</a>
@@ -123,6 +124,18 @@
     <div class="panel"><div class="panel-head"><div><h2>批次庫存與有效日期</h2><p id="batchCount">可依效期排序及搜尋；已出貨量依 FEFO 即時計算</p></div><div class="toolbar"><div class="seg" id="batchSeg" role="group" aria-label="效期篩選"><button type="button" data-bmode="all" class="on">全部</button><button type="button" data-bmode="soon">15 天內到期<span class="seg-n" id="batchSoonN" hidden></span></button><button type="button" data-bmode="expired">已過期<span class="seg-n" id="batchExpN" hidden></span></button></div><label class="tog" for="batchLive"><input type="checkbox" id="batchLive" checked>只看有庫存</label><input id="batchFilter" class="search" type="search" placeholder="搜尋品號／品名／有效日期" aria-label="搜尋批次庫存"><button type="button" class="btn small" data-action="csv-batches">匯出 CSV</button></div></div><div id="batchTable" class="table-scroll"></div></div>
   </section>
 
+  <section id="batchrule" class="section">
+    <p class="section-intro">批號 8 碼：第 1、2、7、8 碼＝<strong>品號碼</strong>，第 3 碼＝<strong>月碼</strong>，第 4 碼＝<strong>年碼</strong>，第 5、6 碼＝<strong>日期碼</strong>。例如 CK-08 在 2026-11-11 生產 → <span class="mono">CKAS1B08</span>。每天在入口網站同步的生產，會自動依生產日期帶入批號，有效日期＝生產日期＋保存天數。</p>
+    <div class="panel-split">
+      <div class="panel"><div class="panel-head"><div><h2>查批號</h2><p>選產品和生產日期，馬上產生批號與有效日期</p></div></div><div class="panel-body"><div class="form-grid br-form">
+        <div class="field span2"><label for="brProduct">產品</label><input id="brProduct" list="productNames" placeholder="輸入品號或品名，從清單選擇" maxlength="80" autocomplete="off"></div>
+        <div class="field"><label for="brDate">生產日期</label><input id="brDate" type="date"></div>
+      </div><div id="brResult" class="br-result"></div></div></div>
+      <div class="panel"><div class="panel-head"><div><h2>編碼對照表</h2><p>依「批號規則」活頁簿</p></div></div><div class="panel-body"><div id="brRefs" class="br-refs"></div></div></div>
+    </div>
+    <div class="panel"><div class="panel-head"><div><h2>每日生產批號</h2><p id="brListCount"></p></div><div class="toolbar"><label class="tog" for="brListDate">日期</label><input id="brListDate" class="search" type="date" aria-label="生產日期"></div></div><div id="brList" class="table-scroll"></div></div>
+    <div class="panel"><div class="panel-head"><div><h2>品號碼對照</h2><p id="brCodeCount"></p></div><div class="toolbar"><input id="brFilter" class="search" type="search" placeholder="搜尋產品" aria-label="搜尋產品"></div></div><div id="brCodes" class="table-scroll"></div></div>
+  </section>
   <section id="allocations" class="section">
     <div class="notice warning">出貨扣批紀錄會按所有資料的「入帳日期／生產日期／出貨日期」重新計算。若事後修改或補登較早日期的資料，歷史扣批結果也可能改變；需要不可修改的正式出貨帳，建議定期保留 JSON 備份。</div>
     <div class="panel"><div class="panel-head"><div><h2>逐筆出貨扣批明細</h2><p id="allocationCount">同張出貨單可分配至不同製作日期和批號</p></div><div class="toolbar"><input id="allocationFilter" class="search" type="search" placeholder="搜尋單號／產品／批號" aria-label="搜尋扣批明細"><button type="button" class="btn small" data-action="csv-allocation">匯出 CSV</button></div></div><div id="allocationTable" class="table-scroll"></div></div>
