@@ -366,8 +366,8 @@ async function openDetail(kind, product) {
     title = `「${product}」的出貨紀錄（${rows.length} 筆）`;
     html = table(['出貨日期', '出貨單號／客戶', '需求量#', '實際出貨#', '缺口', '扣貨批數#', '備註', '登錄人', ...manageCol('shipment')], rows.map(x => { const s = ledger.shipments.get(x.id) || { shipped: 0, shortage: x.quantity, allocations: [] }; return `<tr>${tdm(x.date)}${td(esc(x.orderNo || '—'))}<td class="num">${fmt(x.quantity)} ${unit}</td><td class="num">${fmt(s.shipped)}</td>${td(s.shortage ? badge(`${fmt(s.shortage)} 未配`, 'bad') : badge('足額', 'ok'))}<td class="num">${s.allocations.length}</td>${td(esc(x.note || '—'))}${tdWho(x)}${manageCell('shipment', x.id)}</tr>`; }));
   } else {
-    const rows = allocationRows(ledger).filter(x => x.product === product);
-    title = `「${product}」的出貨扣批明細（${rows.length} 筆）`;
+    const day = allocDay(), rows = allocationRows(ledger).filter(x => x.product === product && x.date === day);
+    title = `「${product}」${day} 的出貨扣批明細（${rows.length} 筆）`;
     html = table(['出貨日', '出貨單號／客戶', '扣除批號', '製作日期', '有效日期', '數量#', '類別'], rows.map(x => `<tr>${tdm(x.date)}${td(esc(x.orderNo || '—'))}${x.kind === 'shortage' ? td(badge('未分配', 'bad')) : td(`<span class="mono">${esc(x.batch)}</span> ${badge(x.pool, x.pool === '現貨' ? 'future' : 'other')}`)}${tdm(x.manufactureDate)}${tdm(expShow(x.expiryDate))}<td class="num">${fmt(x.quantity)} ${esc(x.unit)}</td>${td(x.kind === 'shortage' ? badge('出貨缺口', 'bad') : badge('已分配', 'ok'))}</tr>`));
   }
   await modal({ title, html: `<div class="table-scroll">${html}</div>`, ok: '關閉', wide: true, noCancel: true });
@@ -419,15 +419,30 @@ function renderBatches(groups, today) {
   $('batchTable').innerHTML = table(['產品', filtered ? `${modeName}的有效日期與數量` : '各有效日期的數量（由早到晚，顏色＝效期狀態）', ...(filtered ? [`${modeName}數量#`] : []), '剩餘庫存#', ...(split ? ['現貨#', '半成品#'] : []), '最早效期狀態'], rows.map(p => { const s = p.total > 0 ? expiryStatus(p.first || NO_EXPIRY, p.total, today) : { label: '已用完', cls: 'other' }; return `<tr>${td(`<strong>${esc(p.product)}</strong>`)}<td class="exp-cell"><div class="exp-chips">${p.exps.map(e => chip(e, p.unit)).join('') || '<span class="who">—</span>'}</div></td>${filtered ? `<td class="num">${fmt(p.match)} ${esc(p.unit)}</td>` : ''}<td class="num">${fmt(p.total)} ${esc(p.unit)}</td>${split ? `<td class="num">${p.stock ? fmt(p.stock) : '—'}</td><td class="num">${p.semi ? fmt(p.semi) : '—'}</td>` : ''}${td(badge(s.label, s.cls))}</tr>`; }), batchMode === 'soon' ? `目前沒有 ${SOON_DAYS} 天內到期的庫存` : batchMode === 'expired' ? '目前沒有已過期的庫存' : '尚無批次庫存紀錄');
 }
 function allocationRows(ledger) { const rows = []; for (const sh of [...data.movements.filter(x => x.type === 'shipment')].sort((a, b) => cmp(b.date, a.date) || productOrder(a.product, b.product) || b.seq - a.seq)) { const r = ledger.shipments.get(sh.id); if (!r) continue; for (const a of r.allocations) rows.push({ date: sh.date, orderNo: sh.orderNo || '', product: sh.product, batch: a.batch, pool: poolLabel(a.pool, sh.date), manufactureDate: a.manufactureDate, expiryDate: a.expiryDate, quantity: a.quantity, unit: getUnit(sh.product), kind: 'allocated' }); if (r.shortage) rows.push({ date: sh.date, orderNo: sh.orderNo || '', product: sh.product, batch: '未分配', manufactureDate: '', expiryDate: '', quantity: r.shortage, unit: getUnit(sh.product), kind: 'shortage' }); } return rows; }
-// 出貨扣批明細：每個品號一列，每天一個標籤「日期：批號（現貨／半成品）×數量、…」，有缺口的標紅
+// 出貨扣批明細：一次看一天（預設最近一天有出貨的日子），每個品號一列，列出那天扣了哪些批號／製作日期（現貨／半成品）
+let allocDate = '';
+const shipDates = () => [...new Set(data.movements.filter(x => x.type === 'shipment').map(x => x.date))].sort();
+function allocDay() { if (isDate(allocDate)) return allocDate; const t = TODAY(), ds = shipDates().filter(d => d <= t); return ds.length ? ds[ds.length - 1] : t; }
 function renderAllocations(ledger) {
-  const all = allocationRows(ledger);
-  const days = new Map(); // 品號|日期 → { product, date, parts: [], short }
-  for (const x of all) { const k = x.product + '\u0000' + x.date; if (!days.has(k)) days.set(k, { product: x.product, date: x.date, seq: 0, parts: [], short: 0, orders: new Set(), text: '' }); const d = days.get(k); if (x.orderNo) d.orders.add(x.orderNo); if (x.kind === 'shortage') d.short = clampQty(d.short + x.quantity); else d.parts.push(x); d.text += ` ${x.batch} ${x.manufactureDate} ${x.orderNo}`; }
-  const groups = groupByProduct([...days.values()], $('allocationFilter').value, ['date', 'text']);
-  const chip = d => { const agg = new Map(); for (const p of d.parts) { const lab = lotLabel(p), k = lab + '|' + p.pool; agg.set(k, { batch: lab, pool: p.pool, q: clampQty((agg.get(k)?.q || 0) + p.quantity), exp: p.expiryDate }); } const txt = [...agg.values()].map(a => `${a.batch}${a.pool === '現貨' ? '現貨' : '半成品'}×${fmt(a.q)}`).join('、'); return `<span class="pill ${d.short ? 'bad' : 'other'} exp-chip" title="${esc(`${d.date}｜${[...d.orders].join('、') || '—'}｜${[...agg.values()].map(a => `${a.batch}（${a.pool}，效期 ${expShow(a.exp)}）×${fmt(a.q)}`).join('、')}${d.short ? '｜缺 ' + fmt(d.short) : ''}`)}"><span class="mono">${esc(md(d.date))}</span> ${esc(txt || '—')}${d.short ? `（缺 ${esc(fmt(d.short))}）` : ''}</span>`; };
-  $('allocationCount').textContent = `共 ${groups.length} 項產品、${all.length} 筆扣批／缺口明細；每個品號一列，每天一個標籤（紅＝有缺口），點「明細」看每一筆`;
-  $('allocationTable').innerHTML = table(['產品', '扣批（日期新到舊：批號、現貨／半成品 × 數量）', '扣貨合計#', '缺口#', '明細'], groups.map(g => { const q = clampQty(g.recs.reduce((s, d) => s + d.parts.reduce((t, p) => t + p.quantity, 0), 0)), sh = clampQty(g.recs.reduce((s, d) => s + d.short, 0)); return `<tr>${td(`<strong>${esc(g.product)}</strong>`)}${chipCell(g.recs, chip, 'allocation', g.product)}<td class="num">${fmt(q)} ${esc(getUnit(g.product))}</td><td class="num">${sh ? badge(fmt(sh), 'bad') : '—'}</td>${detailBtn('allocation', g.product)}</tr>`; }), '尚無出貨扣批紀錄');
+  const day = allocDay(), dates = shipDates(), prev = dates.filter(d => d < day).pop(), next = dates.find(d => d > day);
+  const di = $('allocationDate'); if (document.activeElement !== di) di.value = day;
+  for (const [id, d] of [['allocPrev', prev], ['allocNext', next]]) { const b = $(id); b.disabled = !d; b.dataset.date = d || ''; b.title = d ? `跳到 ${d}` : '沒有更多有出貨的日子'; }
+  const byP = new Map();
+  for (const x of allocationRows(ledger)) {
+    if (x.date !== day) continue;
+    if (!byP.has(x.product)) byP.set(x.product, { product: x.product, parts: new Map(), short: 0, orders: new Set(), text: '' });
+    const g = byP.get(x.product); if (x.orderNo) g.orders.add(x.orderNo);
+    if (x.kind === 'shortage') { g.short = clampQty(g.short + x.quantity); continue; }
+    const lab = lotLabel(x), k = lab + '|' + x.pool, a = g.parts.get(k) || { lab, pool: x.pool, q: 0, exp: x.expiryDate, mfg: x.manufactureDate };
+    a.q = clampQty(a.q + x.quantity); g.parts.set(k, a); g.text += ` ${lab} ${x.pool} ${x.manufactureDate} ${x.orderNo}`;
+  }
+  const reqOf = new Map(); for (const r of data.movements) if (r.type === 'shipment' && r.date === day) reqOf.set(r.product, clampQty((reqOf.get(r.product) || 0) + r.quantity));
+  const rows = searchable([...byP.values()], $('allocationFilter').value, ['product', 'text']).sort((a, b) => productOrder(a.product, b.product));
+  const tot = (list, f) => clampQty(list.reduce((s, g) => s + f(g), 0)), qOf = g => tot([...g.parts.values()], a => a.q);
+  const stockQ = tot(rows, g => tot([...g.parts.values()].filter(a => a.pool === '現貨'), a => a.q)), allQ = tot(rows, qOf), shortQ = tot(rows, g => g.short);
+  $('allocationCount').textContent = rows.length ? `${day}：${rows.length} 項產品，扣貨 ${fmt(allQ)} 個（現貨 ${fmt(stockQ)}、半成品 ${fmt(clampQty(allQ - stockQ))}）${shortQ ? `，缺口 ${fmt(shortQ)} 個` : ''}；用上方的日期或「前一天／後一天」切換` : `${day} 沒有出貨扣批紀錄`;
+  const chip = a => `<span class="pill ${a.pool === '現貨' ? 'future' : 'other'} exp-chip" title="${esc(`${a.pool}｜${a.lab}｜製作 ${a.mfg}｜效期 ${expShow(a.exp)}`)}"><span class="mono">${esc(a.lab)}</span> ${esc(a.pool)} ×${esc(fmt(a.q))}</span>`;
+  $('allocationTable').innerHTML = table(['產品', `${md(day)} 扣的批號／製作日期（先到期先扣）`, '出貨需求#', '扣貨#', '缺口#', '明細'], rows.map(g => `<tr>${td(`<strong>${esc(g.product)}</strong>`)}<td class="exp-cell"><div class="exp-chips">${[...g.parts.values()].map(chip).join('')}${g.short ? `<span class="pill bad exp-chip">缺 ${esc(fmt(g.short))}</span>` : ''}</div></td><td class="num">${fmt(reqOf.get(g.product) || 0)}</td><td class="num">${fmt(qOf(g))} ${esc(getUnit(g.product))}</td><td class="num">${g.short ? badge(fmt(g.short), 'bad') : '—'}</td>${detailBtn('allocation', g.product)}</tr>`), `${day} 沒有出貨扣批紀錄`);
 }
 function renderProducts(products) {
   const base = $('productLive').checked ? products.filter(x => x.usable > 0 || x.expired > 0) : products;
@@ -1035,6 +1050,7 @@ async function handleAction(el) {
   if (a === 'edit-user') { const u = (U.list || []).find(x => x.email === id); return u && openUserForm(u, true); }
   if (a === 'toggle-user') { const u = (U.list || []).find(x => x.email === id); return u && userCall('userSave', { email: u.email, name: u.name, pages: u.pages, enabled: !u.enabled }, u.enabled ? '已停用，這個人會馬上被登出' : '已啟用'); }
   if (a === 'delete-user') { const u = (U.list || []).find(x => x.email === id); if (!u || !await modal({ title: '刪除這位人員？', html: `<p>${esc(u.name || u.email)}（${esc(u.email)}）會馬上被登出，之後不能再登入。他登錄過的資料會保留。</p>`, ok: '刪除', danger: true })) return; return userCall('userDelete', { email: u.email }, '已刪除'); }
+  if (a === 'alloc-day') { if (isDate(el.dataset.date)) { allocDate = el.dataset.date; scheduleRender(); } return; }
   if (a === 'edit-bcode') return editBatchCode(id);
   if (a === 'shop-detail') return openShopDetail(el.dataset.shop, id);
   if (a === 'shop-delete') return deleteShopRec(el.dataset.shop, id);
@@ -1066,6 +1082,7 @@ function bind() {
   $('batchSeg').addEventListener('click', e => { const b = e.target.closest('[data-bmode]'); if (!b) return; batchMode = b.dataset.bmode; scheduleRender(); });
   $('openingForm').addEventListener('submit', saveOpening);
   for (const id of ['brProduct', 'brDate', 'brListDate', 'brFilter']) $(id).addEventListener('input', scheduleRender);
+  $('allocationDate').addEventListener('change', e => { if (isDate(e.target.value)) { allocDate = e.target.value; scheduleRender(); } });
   renderBatchRefs();
   for (const { id } of SHOPS) {
     $('shopForm-' + id).addEventListener('submit', e => saveShop(e, id));

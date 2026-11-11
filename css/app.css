@@ -55,6 +55,9 @@ body:not(.can-produce) .need-produce,body:not(.can-ship) .need-ship,body:not(.ca
 .seg button:last-child{border-right:0}
 .seg button:hover{background:var(--surface-hover);color:var(--ink-2)}
 .seg button.on{background:var(--accent);color:var(--on-accent)}
+.day-nav{display:inline-flex;align-items:center;gap:6px}
+.day-nav input{width:auto}
+.day-nav .btn:disabled{opacity:.45;cursor:not-allowed}
 .br-result{margin-top:14px}
 .br-code{font-size:34px;font-weight:800;letter-spacing:4px;color:var(--ink);margin:4px 0 10px}
 .br-parts{display:flex;flex-wrap:wrap;gap:6px 14px;font-size:12px;color:var(--muted)}

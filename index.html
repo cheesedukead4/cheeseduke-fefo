@@ -137,7 +137,7 @@
   </section>
   <section id="allocations" class="section">
     <div class="notice warning">出貨扣批紀錄會按所有資料的「入帳日期／生產日期／出貨日期」重新計算。若事後修改或補登較早日期的資料，歷史扣批結果也可能改變；需要不可修改的正式出貨帳，建議定期保留 JSON 備份。</div>
-    <div class="panel"><div class="panel-head"><div><h2>逐筆出貨扣批明細</h2><p id="allocationCount">同張出貨單可分配至不同製作日期和批號</p></div><div class="toolbar"><input id="allocationFilter" class="search" type="search" placeholder="搜尋單號／產品／批號" aria-label="搜尋扣批明細"><button type="button" class="btn small" data-action="csv-allocation">匯出 CSV</button></div></div><div id="allocationTable" class="table-scroll"></div></div>
+    <div class="panel"><div class="panel-head"><div><h2>每日出貨扣批明細</h2><p id="allocationCount">一次看一天</p></div><div class="toolbar"><div class="day-nav"><button type="button" class="btn small" id="allocPrev" data-action="alloc-day">◀ 前一天</button><input id="allocationDate" class="search" type="date" aria-label="出貨日期"><button type="button" class="btn small" id="allocNext" data-action="alloc-day">後一天 ▶</button></div><input id="allocationFilter" class="search" type="search" placeholder="搜尋產品／批號" aria-label="搜尋扣批明細"><button type="button" class="btn small" data-action="csv-allocation">匯出 CSV</button></div></div><div id="allocationTable" class="table-scroll"></div></div>
   </section>
 
   <section id="products" class="section">
