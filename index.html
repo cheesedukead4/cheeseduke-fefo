@@ -76,7 +76,7 @@
   </section>
 
   <section id="opening" class="section">
-    <p class="section-intro">登錄開始使用系統前已經有的半成品庫存：只要填製作日期與有效日期，不用批號（轉成現貨時才依製作日期產生批號）。同一產品可有多筆不同製作日期，每筆都會獨立追蹤效期。</p>
+    <p class="section-intro">登錄開始使用系統前已經有的半成品庫存：只要填製作日期與有效日期，不用批號（轉成現貨時才用轉現貨當天產生批號）。同一產品可有多筆不同製作日期，每筆都會獨立追蹤效期。</p>
     <div class="panel form-area need-produce"><div class="panel-head"><div><h2 id="openingFormTitle">新增期初庫存</h2><p>入帳日決定這批庫存從哪一天開始可以被出貨扣除。</p></div></div><div class="panel-body"><form id="openingForm" class="form-grid" novalidate>
       <div class="field"><label for="oProduct">產品名稱 *</label><input id="oProduct" list="productNames" required placeholder="輸入品號或品名" maxlength="80" autocomplete="off"></div>
       <div class="field"><label for="oUnit">單位 *</label><input id="oUnit" required value="個" maxlength="12" placeholder="個／盒／公斤"></div>
@@ -124,7 +124,7 @@
   </section>
 
   <section id="batchrule" class="section">
-    <p class="section-intro">批號 8 碼：第 1、2、7、8 碼＝<strong>品號碼</strong>，第 3 碼＝<strong>月碼</strong>，第 4 碼＝<strong>年碼</strong>，第 5、6 碼＝<strong>日期碼</strong>。例如 CK-08 在 2026-11-11 生產 → <span class="mono">CKAS1B08</span>。有效日期＝製作日期＋保存天數。<strong>還沒轉現貨的半成品不給批號</strong>，只看製作日期與有效日期；生產轉現貨會依生產日期帶入批號，半成品轉成現貨時依它的製作日期產生批號。</p>
+    <p class="section-intro">批號 8 碼：第 1、2、7、8 碼＝<strong>品號碼</strong>，第 3 碼＝<strong>月碼</strong>，第 4 碼＝<strong>年碼</strong>，第 5、6 碼＝<strong>日期碼</strong>。例如 CK-08 在 2026-11-11 生產 → <span class="mono">CKAS1B08</span>。有效日期＝製作日期＋保存天數。<strong>還沒轉現貨的半成品不給批號</strong>，只看製作日期與有效日期；生產轉現貨會依生產日期帶入批號，半成品轉成現貨時，批號用轉現貨當天的日期（有效日期還是照那批半成品）。</p>
     <div class="panel-split">
       <div class="panel"><div class="panel-head"><div><h2>查批號</h2><p>選產品和生產日期，馬上產生批號與有效日期</p></div></div><div class="panel-body"><div class="form-grid br-form">
         <div class="field span2"><label for="brProduct">產品</label><input id="brProduct" list="productNames" placeholder="輸入品號或品名，從清單選擇" maxlength="80" autocomplete="off"></div>

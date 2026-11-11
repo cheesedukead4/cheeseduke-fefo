@@ -205,7 +205,8 @@ function calculateLedger(asOf = '9999-12-31', st = data) {
         if (need <= 1e-7) break;
         const q = clampQty(Math.min(need, lot.remaining));
         lot.remaining = clampQty(lot.remaining - q); lot.used = clampQty(lot.used + q); lot.converted = clampQty(lot.converted + q); need = clampQty(need - q);
-        addLot({ id: x.id + '#' + lot.id, source: 'convert', pool: 'stock', product: lot.product, batch: lot.batch !== '—' ? lot.batch : makeBatch(lot.product, lot.manufactureDate) || '—', manufactureDate: lot.manufactureDate, expiryDate: lot.expiryDate, entryDate: e.date, quantity: q, used: 0, shipped: 0, converted: 0, remaining: q, seq: x.seq || 0, unit: lot.unit, fromLot: lot.id });
+        // 半成品轉現貨：批號用轉現貨當天，有效日期沿用那批半成品
+        addLot({ id: x.id + '#' + lot.id, source: 'convert', pool: 'stock', product: lot.product, batch: makeBatch(lot.product, e.date) || '—', manufactureDate: lot.manufactureDate, expiryDate: lot.expiryDate, entryDate: e.date, quantity: q, used: 0, shipped: 0, converted: 0, remaining: q, seq: x.seq || 0, unit: lot.unit, fromLot: lot.id });
       }
       converts.set(x.id, { required, moved: clampQty(required - need), shortage: clampQty(need) });
       continue;
