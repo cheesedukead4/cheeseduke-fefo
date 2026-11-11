@@ -387,7 +387,13 @@ function expChip(e, unit, today) {
 function renderBatches(groups, today) {
   const split = !isStockModeDay(today), byP = byProductExpiry(groups);
   // 篩選：全部｜15 天內到期（0～15 天，不含已過期）｜已過期；篩選時每列只顯示符合的有效日期
-  const inMode = e => batchMode === 'all' || (e.expiry !== NO_EXPIRY && (batchMode === 'soon' ? dayDiff(today, e.expiry) >= 0 && dayDiff(today, e.expiry) <= SOON_DAYS : dayDiff(today, e.expiry) < 0));
+  const inRange = (e, m) => { if (e.expiry === NO_EXPIRY) return false; const d = dayDiff(today, e.expiry); return m === 'soon' ? d >= 0 && d <= SOON_DAYS : d < 0; };
+  const inMode = e => batchMode === 'all' || inRange(e, batchMode);
+  // 按鈕上的紅色數字：幾項產品（品號）有 15 天內到期／已過期的庫存
+  for (const [m, id, lab] of [['soon', 'batchSoonN', `項產品 ${SOON_DAYS} 天內即將到期`], ['expired', 'batchExpN', '項產品已過期']]) {
+    const n = [...byP.values()].filter(p => p.exps.some(e => inRange(e, m))).length, el = $(id);
+    el.hidden = !n; el.textContent = n; el.parentElement.title = n ? `${n} ${lab}` : `沒有${lab.replace('項產品 ', '').replace('項產品', '')}的產品`;
+  }
   const list = [...byP.values()].map(p => { const all = p.exps, exps = all.filter(inMode), first = all.find(e => e.expiry !== NO_EXPIRY) || all[0]; return { ...p, exps, match: clampQty(exps.reduce((s, e) => s + e.total, 0)), first: first ? first.expiry : '', expText: all.map(e => e.expiry).join(' ') }; });
   const base = batchMode !== 'all' ? list.filter(p => p.exps.length) : $('batchLive').checked ? list.filter(p => p.total > 0) : list;
   const rows = searchable(base, $('batchFilter').value, ['product', 'expText']).sort((a, b) => (a.total > 0 ? 0 : 1) - (b.total > 0 ? 0 : 1) || productOrder(a.product, b.product));

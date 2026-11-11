@@ -55,6 +55,8 @@ body:not(.can-produce) .need-produce,body:not(.can-ship) .need-ship,body:not(.ca
 .seg button:last-child{border-right:0}
 .seg button:hover{background:var(--surface-hover);color:var(--ink-2)}
 .seg button.on{background:var(--accent);color:var(--on-accent)}
+.seg-n{display:inline-block;min-width:18px;margin-left:6px;padding:0 5px;border-radius:9px;background:var(--bad-mark);color:#fff;font-size:11px;font-weight:800;line-height:18px;text-align:center;vertical-align:1px}
+.seg button.on .seg-n{background:#fff;color:var(--bad-fg)}
 .data-table td.exp-cell{white-space:normal;min-width:280px}
 .exp-chips{display:flex;flex-wrap:wrap;gap:6px}
 .exp-chip{font-weight:600}
