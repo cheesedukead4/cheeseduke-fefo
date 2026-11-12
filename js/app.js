@@ -1331,7 +1331,37 @@ FEStore.on((type, payload) => {
   else if (type === 'conflict') toast('有同事同時修改了同一筆資料，已自動合併；同一個欄位以你的修改為準。');
 });
 FEAuth.on(() => { applyPerms(); scheduleRender(); });
-buildShops(); bind(); resetForms(); showView(location.hash.slice(1) || 'dashboard'); renderSync();
+/* ---------- 寬表格：左右捲動條固定在畫面下緣 ----------
+   表格比畫面寬時，在表格後面放一條同步的左右捲動條（position: sticky; bottom: 0），
+   捲到表格中間也看得到、拖得到，不用先捲到表格最下面。只在有滑鼠的電腦上顯示；手機直接用手指左右滑表格。 */
+const HBAR_MQ = window.matchMedia ? window.matchMedia('(pointer: fine)') : null;
+let hbarRaf = 0;
+function hbarSync(sc) {
+  let bar = sc.nextElementSibling;
+  if (!bar || !bar.classList.contains('hbar')) {
+    bar = document.createElement('div'); bar.className = 'hbar'; bar.hidden = true; bar.setAttribute('aria-hidden', 'true'); bar.appendChild(document.createElement('div')); sc.after(bar);
+    bar.addEventListener('scroll', () => { if (sc.scrollLeft !== bar.scrollLeft) sc.scrollLeft = bar.scrollLeft; }, { passive: true });
+    sc.addEventListener('scroll', () => { if (bar.scrollLeft !== sc.scrollLeft) bar.scrollLeft = sc.scrollLeft; }, { passive: true });
+  }
+  const on = (!HBAR_MQ || HBAR_MQ.matches) && sc.scrollWidth > sc.clientWidth + 1;
+  if (bar.hidden === on) bar.hidden = !on;
+  sc.classList.toggle('has-hbar', on);
+  if (on) { const w = sc.scrollWidth + 'px'; if (bar.firstChild.style.width !== w) bar.firstChild.style.width = w; if (bar.scrollLeft !== sc.scrollLeft) bar.scrollLeft = sc.scrollLeft; }
+}
+const hbarRO = 'ResizeObserver' in window ? new ResizeObserver(() => hbarQueue()) : null;
+function hbarQueue() {
+  if (hbarRaf) return;
+  hbarRaf = setTimeout(() => { hbarRaf = 0; document.querySelectorAll('.table-scroll').forEach(sc => { if (!sc.hbarOn) { sc.hbarOn = true; if (hbarRO) hbarRO.observe(sc); } hbarSync(sc); }); }, 40);
+}
+function hbarInit() {
+  // 表格內容換掉（重新整理、搜尋、切換頁面、打開明細）都重算一次
+  new MutationObserver(hbarQueue).observe(document.body, { childList: true, subtree: true });
+  window.addEventListener('resize', hbarQueue);
+  if (HBAR_MQ && HBAR_MQ.addEventListener) HBAR_MQ.addEventListener('change', hbarQueue);
+  hbarQueue();
+}
+
+buildShops(); bind(); resetForms(); hbarInit(); showView(location.hash.slice(1) || 'dashboard'); renderSync();
 FEAuth.ready.then(() => { applyPerms(); rebuild(); resetForms(); render(); applyPortalPending(); });
 if ('serviceWorker' in navigator && location.protocol === 'https:') {
   window.addEventListener('load', () => { navigator.serviceWorker.register('service-worker.js').catch(() => {}); });
