@@ -101,8 +101,9 @@ function sanitizeRec(r) {
   if (r.type === 'convert') return isDate(r.date) ? { ...base, type: 'convert', date: r.date } : null; // 半成品轉現貨
   if (r.type === 'adjust') { // 半成品增減：add 增加一批（有製作日期、有效日期）；sub 減少（可指定哪一批 fromMfg／fromExp）
     if (!isDate(r.date) || (r.dir !== 'add' && r.dir !== 'sub')) return null;
-    // pool 'stock'＝現貨增減（入口網站「現貨增減」）；phase 'pack'＝入口網站帶入的包裝區增減，跟轉現貨同時算（出貨前）
-    const extra = { ...(r.pool === 'stock' ? { pool: 'stock' } : {}), ...(r.phase === 'pack' ? { phase: 'pack' } : {}) };
+    // pool 'stock'＝現貨增減（入口網站「現貨增減」）；phase 'pack'＝入口網站帶入的包裝區增減，跟轉現貨同時算（出貨前）；
+    // phase 'open'＝隔夜差異（總表當天期初跟前一天期末對不上），算在當天一開始
+    const extra = { ...(r.pool === 'stock' ? { pool: 'stock' } : {}), ...(r.phase === 'pack' || r.phase === 'open' ? { phase: r.phase } : {}) };
     if (r.dir === 'add') return isDate(r.manufactureDate) && isDate(r.expiryDate) ? { ...base, ...extra, type: 'adjust', dir: 'add', date: r.date, batch: '—', manufactureDate: r.manufactureDate, expiryDate: r.expiryDate } : null;
     return { ...base, ...extra, type: 'adjust', dir: 'sub', date: r.date, fromMfg: isDate(r.fromMfg) ? r.fromMfg : '', fromExp: isDate(r.fromExp) ? r.fromExp : '' };
   }
@@ -138,7 +139,7 @@ function recordBody(rec) {
   if (rec.editBy) { b.editBy = rec.editBy; b.editAt = rec.editAt; }
   if (rec.type === 'shipment') { b.date = rec.date; b.orderNo = rec.orderNo || ''; }
   else if (rec.type === 'convert') b.date = rec.date;
-  else if (rec.type === 'adjust') { b.date = rec.date; b.dir = rec.dir; if (rec.pool === 'stock') b.pool = 'stock'; if (rec.phase === 'pack') b.phase = 'pack'; if (rec.dir === 'add') { b.manufactureDate = rec.manufactureDate; b.expiryDate = rec.expiryDate; } else { b.fromMfg = rec.fromMfg || ''; b.fromExp = rec.fromExp || ''; } }
+  else if (rec.type === 'adjust') { b.date = rec.date; b.dir = rec.dir; if (rec.pool === 'stock') b.pool = 'stock'; if (rec.phase === 'pack' || rec.phase === 'open') b.phase = rec.phase; if (rec.dir === 'add') { b.manufactureDate = rec.manufactureDate; b.expiryDate = rec.expiryDate; } else { b.fromMfg = rec.fromMfg || ''; b.fromExp = rec.fromExp || ''; } }
   else { b.batch = rec.batch; b.manufactureDate = rec.manufactureDate; b.expiryDate = rec.expiryDate; if (rec.type === 'opening') b.entryDate = rec.entryDate; else b.date = rec.date; if (rec.pool === 'stock') b.pool = 'stock'; }
   return b;
 }
@@ -190,8 +191,8 @@ function exportState() {
 // 批次 pool：'stock' 現貨、'semi' 半成品（全現貨模式的有效期批次也記成 semi，但出貨時一律當現貨看）
 // lot.used＝已扣（出貨＋轉成現貨）、lot.shipped＝只算出貨、lot.converted＝轉成現貨的量
 // 增減的順序：半成品增加＝當天一開始；入口網站的半成品減少（含轉試吃）＝跟轉現貨同時（出貨前）；現貨增加＝轉現貨之後、出貨前；
-//            手動的半成品減少、現貨減少＝當天結束（出貨之後）
-const adjPriority = x => x.dir === 'add' ? (x.pool === 'stock' ? 1.5 : 0) : (x.pool !== 'stock' && x.phase === 'pack' ? 0.9 : 3);
+//            手動的半成品減少、現貨減少＝當天結束（出貨之後）；隔夜差異（phase 'open'）＝當天最一開始（比當天入庫還早）
+const adjPriority = x => x.phase === 'open' ? -1 : x.dir === 'add' ? (x.pool === 'stock' ? 1.5 : 0) : (x.pool !== 'stock' && x.phase === 'pack' ? 0.9 : 3);
 const baseCode = name => productCodeOf(name).split('|')[0];
 function calculateLedger(asOf = '9999-12-31', st = data) {
   const events = [], prio = { production: 0, convert: 1, shipment: 2 };
@@ -989,10 +990,12 @@ const stockFromDate = () => isDate(portalMeta().stockFrom) ? portalMeta().stockF
 const isStockModeDay = d => { const s = stockFromDate(); return !!s && d >= s; };
 const productCodeOf = name => { const s = clean(name), i = s.indexOf(' '); return i > 0 ? s.slice(0, i) : s; };
 function decodeB64url(s) { s = s.replace(/-/g, '+').replace(/_/g, '/'); while (s.length % 4) s += '='; return JSON.parse(decodeURIComponent(escape(atob(s)))); }
-// 書籤資料整理乾淨：{ v:4, t: 書籤當天, d: { 日期: [[品號, 品名, 半成品入庫, 實際揀貨, 期初現貨, 生產轉現貨, 半成品轉現貨, 半成品增減(±), 現貨增減(±), 半成品轉試吃], ...] }, w: 讀取失敗的日期說明 }
-// （舊書籤：v:1 只有前 4 欄，不動現貨紀錄；v:2 沒有半成品轉現貨，不動轉現貨紀錄；v:3 沒有增減，不動增減紀錄）
+// 書籤資料整理乾淨：{ v:5, t: 書籤當天, d: { 日期: [[品號, 品名, 半成品入庫, 實際揀貨, 期初現貨, 生產轉現貨, 半成品轉現貨, 半成品增減(±), 現貨增減(±), 半成品轉試吃,
+//                                        手動半成品(±), 手動現貨(±), 隔夜差異半成品(±), 隔夜差異現貨(±)], ...] }, ng: 沒讀到前一天、算不出隔夜差異的日期, w: 讀取失敗的日期說明 }
+// 隔夜差異＝總表當天的期初 − 前一天的期末（總表自己對不上的數字，例如盤點後直接改期初）
+// （舊書籤：v:1 只有前 4 欄，不動現貨紀錄；v:2 沒有半成品轉現貨，不動轉現貨紀錄；v:3 沒有增減，不動增減紀錄；v:4 沒有手動與隔夜差異，不動那些紀錄）
 function cleanPortal(p) {
-  if (!p || ![1, 2, 3, 4].includes(p.v) || !p.d || typeof p.d !== 'object') throw Error('資料格式不對，請重新拖曳最新的書籤');
+  if (!p || ![1, 2, 3, 4, 5].includes(p.v) || !p.d || typeof p.d !== 'object') throw Error('資料格式不對，請重新拖曳最新的書籤');
   const qty = v => { v = Number(v); return v > 0 && v < 1e7 ? clampQty(v) : 0; }, sqty = v => { v = Number(v); return Number.isFinite(v) && Math.abs(v) < 1e7 ? clampQty(v) : 0; };
   const days = {};
   for (const ds of Object.keys(p.d).slice(0, 62)) {
@@ -1003,12 +1006,12 @@ function cleanPortal(p) {
       const code = clean(a[0]);
       if (!CODE_RE.test(code) || seen.has(code)) continue;
       seen.add(code);
-      rows.push({ code, name: clean(a[1]).slice(0, 40), inQ: qty(a[2]), outQ: qty(a[3]), openStock: qty(a[4]), toStock: qty(a[5]), semiToStock: qty(a[6]), semiAdj: sqty(a[7]), stockAdj: sqty(a[8]), toTasting: qty(a[9]) });
+      rows.push({ code, name: clean(a[1]).slice(0, 40), inQ: qty(a[2]), outQ: qty(a[3]), openStock: qty(a[4]), toStock: qty(a[5]), semiToStock: qty(a[6]), semiAdj: sqty(a[7]), stockAdj: sqty(a[8]), toTasting: qty(a[9]), manSemi: sqty(a[10]), manStock: sqty(a[11]), gapSemi: sqty(a[12]), gapStock: sqty(a[13]) });
     }
     days[ds] = rows;
   }
   if (!Object.keys(days).length) throw Error('沒有讀到任何日期的總表');
-  return { days, hasStock: p.v >= 2, hasConvert: p.v >= 3, hasAdjust: p.v >= 4, warn: typeof p.w === 'string' ? p.w.slice(0, 300) : '' };
+  return { days, hasStock: p.v >= 2, hasConvert: p.v >= 3, hasAdjust: p.v >= 4, hasExtra: p.v >= 5, noGap: new Set(p.v >= 5 && Array.isArray(p.ng) ? p.ng.filter(isDate) : []), warn: typeof p.w === 'string' ? p.w.slice(0, 300) : '' };
 }
 let portalApplying = false;
 function applyPortalPending() {
@@ -1041,7 +1044,7 @@ function applyPortalPending() {
       return p;
     };
     const existing = new Map(data.movements.filter(r => r.id.startsWith('pt-')).map(r => [r.id, r]));
-    const saves = [], removes = [], who = myName(), at = nowIso(), sum = { pN: 0, pQ: 0, sN: 0, sQ: 0, qN: 0, qQ: 0, cN: 0, cQ: 0, jN: 0 };
+    const saves = [], removes = [], who = myName(), at = nowIso(), sum = { pN: 0, pQ: 0, sN: 0, sQ: 0, qN: 0, qQ: 0, cN: 0, cQ: 0, jN: 0, gN: 0 };
     // 期初現貨：起算日那天總表的「期初現貨」，每個品號一筆期初庫存（批號「現貨」、沒有效期）；書籤有讀到起算日才更新
     const openSaves = [], openRemoves = [], stockOpen = { n: 0, q: 0, set: false };
     if (c.hasStock && okP && from && c.days[from]) {
@@ -1062,18 +1065,28 @@ function applyPortalPending() {
       if (stockMode) modeB++;
       for (const r of c.days[ds]) {
         if (c.hasAdjust && okP) {
-          // 半成品增減（±）、半成品轉試吃（減）、現貨增減（±）：記成「增減」紀錄（包裝區，出貨前算）
-          const adjOne = (suffix, signed, pool, label) => {
+          // 半成品增減（±）、半成品轉試吃（減）、現貨增減（±）、總表的手動數字（±）：記成「增減」紀錄（包裝區，出貨前算）
+          // 隔夜差異（±）：總表當天期初跟前一天期末對不上的數字，算在當天一開始（phase 'open'）；增加的不知道是哪一批，製作日期用前一天
+          const adjOne = (suffix, signed, pool, label, phase = 'pack') => {
             if (!signed) return;
-            const p = productFor(r.code, r.name), id = `pt-j${suffix}-${ds}-${r.code}`, old = existing.get(id), dir = signed > 0 ? 'add' : 'sub', q = clampQty(Math.abs(signed));
-            want.add(id); sum.jN++;
-            const body = { type: 'adjust', dir, date: ds, product: p.name, quantity: q, note: `入口網站：${label}`, phase: 'pack', ...(pool === 'stock' ? { pool: 'stock' } : {}), ...(dir === 'add' ? { batch: '—', manufactureDate: ds, expiryDate: addDays(ds, p.shelfDays) } : { fromMfg: '', fromExp: '' }) };
+            const p = productFor(r.code, r.name), id = `pt-j${suffix}-${ds}-${r.code}`, old = existing.get(id), dir = signed > 0 ? 'add' : 'sub', q = clampQty(Math.abs(signed)), mfg = phase === 'open' ? addDays(ds, -1) : ds;
+            want.add(id); sum.jN++; if (phase === 'open') sum.gN++;
+            const body = { type: 'adjust', dir, date: ds, product: p.name, quantity: q, note: `入口網站：${label}`, phase, ...(pool === 'stock' ? { pool: 'stock' } : {}), ...(dir === 'add' ? { batch: '—', manufactureDate: mfg, expiryDate: addDays(mfg, p.shelfDays) } : { fromMfg: '', fromExp: '' }) };
             const rec = old ? { ...old, ...body } : { id, seq: nextSeq(), ...body, by: who, at };
-            if (!old || old.quantity !== rec.quantity || old.dir !== rec.dir || old.product !== rec.product || (old.pool || '') !== (rec.pool || '') || old.note !== rec.note || old.phase !== rec.phase) saves.push(rec);
+            if (!old || old.quantity !== rec.quantity || old.dir !== rec.dir || old.product !== rec.product || (old.pool || '') !== (rec.pool || '') || old.note !== rec.note || old.phase !== rec.phase || old.manufactureDate !== rec.manufactureDate) saves.push(rec);
           };
           adjOne('s', r.semiAdj, 'semi', r.semiAdj > 0 ? '半成品增加' : '半成品減少');
           adjOne('t', -r.toTasting, 'semi', '半成品轉試吃');
           adjOne('k', r.stockAdj, 'stock', r.stockAdj > 0 ? '現貨增加' : '現貨減少');
+          if (c.hasExtra) {
+            adjOne('m', r.manSemi, 'semi', r.manSemi > 0 ? '總表手動・半成品增加' : '總表手動・半成品減少');
+            adjOne('n', r.manStock, 'stock', r.manStock > 0 ? '總表手動・現貨增加' : '總表手動・現貨減少');
+            // 起算日當天的期初已經用 App 的期初庫存（與期初現貨），不再算隔夜差異
+            if (ds !== from && !c.noGap.has(ds)) {
+              adjOne('g', r.gapSemi, 'semi', r.gapSemi > 0 ? '隔夜差異・半成品增加' : '隔夜差異・半成品減少', 'open');
+              adjOne('h', r.gapStock, 'stock', r.gapStock > 0 ? '隔夜差異・現貨增加' : '隔夜差異・現貨減少', 'open');
+            }
+          }
         }
         if (stockMode) {
           // 全現貨模式：當天生產＝半成品入庫＋生產轉現貨，一個有效期的現貨批次
@@ -1119,7 +1132,7 @@ function applyPortalPending() {
           if (!old || old.quantity !== rec.quantity || old.product !== rec.product) saves.push(rec);
         }
       }
-      for (const [id, r] of existing) if (r.date === ds && !want.has(id) && ((r.type === 'production' && okP && (c.hasStock || !id.startsWith('pt-q-'))) || (r.type === 'convert' && okP && (c.hasConvert || stockMode)) || (r.type === 'adjust' && okP && c.hasAdjust) || (r.type === 'shipment' && okS))) removes.push(id);
+      for (const [id, r] of existing) if (r.date === ds && !want.has(id) && ((r.type === 'production' && okP && (c.hasStock || !id.startsWith('pt-q-'))) || (r.type === 'convert' && okP && (c.hasConvert || stockMode)) || (r.type === 'adjust' && okP && c.hasAdjust && (c.hasExtra || !/^pt-j[mngh]-/.test(id)) && !(/^pt-j[gh]-/.test(id) && c.noGap.has(ds))) || (r.type === 'shipment' && okS))) removes.push(id);
     }
     if (newProducts.length) FEStore.saveMany('products', newProducts.map(p => ({ id: p.id, name: p.name, unit: p.unit, shelfDays: p.shelfDays, lowStock: 0 })));
     if (openSaves.length) FEStore.saveMany('opening', openSaves.map(recordBody));
@@ -1129,31 +1142,38 @@ function applyPortalPending() {
     const meta = portalMeta(), changed = saves.length + removes.length + openSaves.length + openRemoves.length;
     FEStore.save('settings', { ...meta, id: 'portal', at: Date.now(), by: who, first: dates[0] || '', last: dates[dates.length - 1] || '', days: dates.length, ...sum, pQ: clampQty(sum.pQ), sQ: clampQty(sum.sQ), qQ: clampQty(sum.qQ), cQ: clampQty(sum.cQ), ...(stockOpen.set ? { stockOpenDate: from, stockOpenN: stockOpen.n, stockOpenQ: clampQty(stockOpen.q) } : {}), newProducts: newProducts.length, changed, warn: c.warn });
     const range = dates.length ? `${shortDate(dates[0])}～${shortDate(dates[dates.length - 1])}` : '沒有可匯入的日期';
-    const parts = [okP ? `${modeB === dates.length && dates.length ? '當天生產' : modeB ? '半成品入庫／當天生產' : '半成品入庫'} ${sum.pN} 筆（${fmt(sum.pQ)} 個）` : '', okP && c.hasStock && sum.qN ? `生產轉現貨 ${sum.qN} 筆（${fmt(sum.qQ)} 個）` : '', okP && c.hasConvert && sum.cN ? `半成品轉現貨 ${sum.cN} 筆（${fmt(sum.cQ)} 個）` : '', okP && c.hasAdjust && sum.jN ? `半成品／現貨增減 ${sum.jN} 筆` : '', okS ? `出貨 ${sum.sN} 筆（${fmt(sum.sQ)} 個）` : ''].filter(Boolean).join('、');
-    const notes = [modeB ? `${modeB === dates.length ? '全部' : `其中 ${modeB} 天`}用全現貨模式（${stockFromDate()} 起）` : '', stockOpen.set ? `期初現貨 ${stockOpen.n} 個品號（${fmt(stockOpen.q)} 個，${from}）` : '', !c.hasAdjust ? '這是舊版書籤，' + (!c.hasStock ? '沒有帶入現貨' : !c.hasConvert ? '沒有帶入半成品轉現貨' : '沒有帶入半成品／現貨增減') + '，請到「入口網站同步」重新拖曳書籤' : '', newProducts.length ? `新增產品 ${newProducts.length} 項` : '', skippedCodes.size ? `略過 ${prefixes.join('、')} 以外的品號 ${skippedCodes.size} 個` : '', excludedCodes.size ? `略過${EXCLUDE_WORDS.join('、')} ${excludedCodes.size} 個品號` : '', before.length ? `起算日 ${from} 以前的 ${before.length} 天沒有匯入` : '', !okP ? '你沒有生產權限，生產數字沒有存' : '', !okS ? '你沒有出貨權限，出貨數字沒有存' : '', c.warn ? '注意：' + c.warn : ''].filter(Boolean).join('；');
+    const parts = [okP ? `${modeB === dates.length && dates.length ? '當天生產' : modeB ? '半成品入庫／當天生產' : '半成品入庫'} ${sum.pN} 筆（${fmt(sum.pQ)} 個）` : '', okP && c.hasStock && sum.qN ? `生產轉現貨 ${sum.qN} 筆（${fmt(sum.qQ)} 個）` : '', okP && c.hasConvert && sum.cN ? `半成品轉現貨 ${sum.cN} 筆（${fmt(sum.cQ)} 個）` : '', okP && c.hasAdjust && sum.jN ? `半成品／現貨增減 ${sum.jN} 筆${sum.gN ? `（其中隔夜差異 ${sum.gN} 筆）` : ''}` : '', okS ? `出貨 ${sum.sN} 筆（${fmt(sum.sQ)} 個）` : ''].filter(Boolean).join('、');
+    const notes = [modeB ? `${modeB === dates.length ? '全部' : `其中 ${modeB} 天`}用全現貨模式（${stockFromDate()} 起）` : '', stockOpen.set ? `期初現貨 ${stockOpen.n} 個品號（${fmt(stockOpen.q)} 個，${from}）` : '', !c.hasExtra ? '這是舊版書籤，' + (!c.hasStock ? '沒有帶入現貨' : !c.hasConvert ? '沒有帶入半成品轉現貨' : !c.hasAdjust ? '沒有帶入半成品／現貨增減' : '沒有帶入總表的手動數字與隔夜差異') + '，請到「入口網站同步」重新拖曳書籤' : '', dates.some(d => c.noGap.has(d)) ? `${dates.filter(d => c.noGap.has(d)).map(shortDate).join('、')} 沒讀到前一天的總表，隔夜差異沒有更新` : '', newProducts.length ? `新增產品 ${newProducts.length} 項` : '', skippedCodes.size ? `略過 ${prefixes.join('、')} 以外的品號 ${skippedCodes.size} 個` : '', excludedCodes.size ? `略過${EXCLUDE_WORDS.join('、')} ${excludedCodes.size} 個品號` : '', before.length ? `起算日 ${from} 以前的 ${before.length} 天沒有匯入` : '', !okP ? '你沒有生產權限，生產數字沒有存' : '', !okS ? '你沒有出貨權限，出貨數字沒有存' : '', c.warn ? '注意：' + c.warn : ''].filter(Boolean).join('；');
     toast(`已同步入口網站 ${range}：${parts}${changed ? '' : '（數字都沒變）'}${notes ? '。' + notes : ''}`, false, 10000);
     go('portal');
   } catch (e) { toast('入口網站資料讀取失敗：' + e.message, true, 8000); }
   finally { portalApplying = false; }
 }
-// 書籤：在入口網站讀最近 14 天的總表（只讀），每天每個品號 [品號, 品名, 半成品入庫, 實際揀貨, 期初現貨, 生產轉現貨, 半成品轉現貨, 半成品增減, 現貨增減, 半成品轉試吃]，放在網址 #portal= 後開啟 App
+// 書籤：在入口網站讀最近 14 天的總表（只讀；多讀前一天算隔夜差異），每天每個品號 [品號, 品名, 半成品入庫, 實際揀貨, 期初現貨, 生產轉現貨, 半成品轉現貨, 半成品增減, 現貨增減, 半成品轉試吃, 手動半成品, 手動現貨, 隔夜差異半成品, 隔夜差異現貨]，放在網址 #portal= 後開啟 App
 function portalBookmarklet() {
   const app = location.origin + location.pathname;
   const code = "(async()=>{" +
     "if(location.hostname.indexOf('flowings.app')<0){if(confirm('這顆書籤要在「入口網站」的頁面按，你現在在別的網站。\\n\\n要現在打開入口網站嗎？打開後請登入，再按一次這顆書籤。'))window.open('" + PORTAL_URL + "','_blank');return}" +
     "var ov=document.createElement('div');ov.textContent='正在讀取總表最近 " + PORTAL_DAYS + " 天的現貨、半成品入庫與實際揀貨…';ov.style.cssText='position:fixed;left:50%;top:20px;transform:translateX(-50%);z-index:2147483647;background:#153b48;color:#fff;padding:12px 18px;border-radius:10px;font:14px sans-serif;box-shadow:0 8px 30px rgba(0,0,0,.3)';document.body.appendChild(ov);" +
-    "try{var p=function(n){return String(n).padStart(2,'0')},f=function(d){return d.getFullYear()+'-'+p(d.getMonth()+1)+'-'+p(d.getDate())},now=new Date(),D={},bad=[],days=[];" +
-    "for(var i=" + (PORTAL_DAYS - 1) + ";i>=0;i--)days.push(f(new Date(now.getFullYear(),now.getMonth(),now.getDate()-i)));" +
+    "try{var p=function(n){return String(n).padStart(2,'0')},f=function(d){return d.getFullYear()+'-'+p(d.getMonth()+1)+'-'+p(d.getDate())},N=function(v){return Number(v)||0},now=new Date(),R={},D={},bad=[],days=[],ng=[];" +
+    // 多讀一天（最舊那天只用來算隔夜差異：當天期初 − 前一天期末）
+    "for(var i=" + PORTAL_DAYS + ";i>=0;i--)days.push(f(new Date(now.getFullYear(),now.getMonth(),now.getDate()-i)));" +
     "await Promise.all(days.map(async function(ds){var u=location.origin+'/api/internal/logistics-console/hq-ledger?date='+ds;" +
     "try{var r=await fetch(u,{credentials:'include',headers:{Accept:'application/json'}});if(!r.ok){bad.push(ds+' HTTP '+r.status);return}" +
-    "var j=await r.json(),L=[];(j.rows||[]).forEach(function(x){var w=x.row||{},a=Number(w.semiIn)||0,b=Number(w.actualPick)||0,c=Number(w.opening&&w.opening.stock)||0,e=Number(w.packing&&w.packing.productionToStock)||0,k=Number(w.packing&&w.packing.semiToStock)||0,sa=Number(w.packing&&w.packing.semiAdjust)||0,ta=Number(w.packing&&w.packing.stockAdjust)||0,tt=Number(w.packing&&w.packing.semiToTasting)||0;if(x.code&&(a>0||b>0||c>0||e>0||k>0||sa||ta||tt>0))L.push([x.code,String(x.name||'').slice(0,30),a,b,c,e,k,sa,ta,tt])});D[ds]=L}catch(e1){bad.push(ds+' '+e1.message)}}));" +
+    "var j=await r.json(),M={};(j.rows||[]).forEach(function(x){if(x&&x.code)M[x.code]=x});R[ds]=M}catch(e1){bad.push(ds+' '+e1.message)}}));" +
+    "days.forEach(function(ds,i){if(!i||!R[ds])return;var M=R[ds],P=R[days[i-1]],L=[],seen={};if(!P)ng.push(ds);" +
+    "Object.keys(M).concat(P?Object.keys(P):[]).forEach(function(cd){if(seen[cd])return;seen[cd]=1;var x=M[cd]||{code:cd,name:P[cd].name},w=x.row||{},o=w.opening||{},k=w.packing||{},mn=w.manual||{},q=P&&P[cd]?((P[cd].row||{}).closing||{}):{}," +
+    "a=N(w.semiIn),b=N(w.actualPick),c=N(o.stock),e=N(k.productionToStock),kk=N(k.semiToStock),sa=N(k.semiAdjust),ta=N(k.stockAdjust),tt=N(k.semiToTasting),ms=N(mn.semi),mk=N(mn.stock),gs=P?N(o.semi)-N(q.semi):0,gk=P?N(o.stock)-N(q.stock):0;" +
+    "if(a>0||b>0||c>0||e>0||kk>0||sa||ta||tt>0||ms||mk||gs||gk)L.push([cd,String(x.name||'').slice(0,30),a,b,c,e,kk,sa,ta,tt,ms,mk,gs,gk])});D[ds]=L});" +
     "if(!Object.keys(D).length)throw new Error('總表沒有讀到任何日期'+(bad.length?'（'+bad.join('；')+'）':''));" +
-    "var s=btoa(unescape(encodeURIComponent(JSON.stringify({v:4,t:f(now),d:D,w:bad.length?'這幾天沒讀到：'+bad.join('；'):''})))).replace(/\\+/g,'-').replace(/\\//g,'_').replace(/=+$/,'');" +
+    "var s=btoa(unescape(encodeURIComponent(JSON.stringify({v:5,t:f(now),d:D,ng:ng,w:bad.length?'這幾天沒讀到：'+bad.join('；'):''})))).replace(/\\+/g,'-').replace(/\\//g,'_').replace(/=+$/,'');" +
     "ov.textContent='讀取完成，正在開啟庫存效期 App…';location.href='" + app + "#portal='+s}catch(e){ov.remove();alert('讀取入口網站失敗：'+e.message+'\\n\\n請確認已經登入入口網站，並在入口網站的頁面（例如物管駕駛艙總表）按這個書籤')}})()";
   return 'javascript:' + encodeURIComponent(code);
 }
-const FLOW_SEMI = '<strong>半成品模式</strong>：<strong>半成品入庫</strong>登錄成有效期的半成品批次；<strong>半成品轉現貨</strong>照總表的實際數量，從效期最早的半成品轉成現貨（保留原本的批號與有效日期，轉多了沒出完的留到隔天）；<strong>生產轉現貨</strong>是當天生產直接做成的現貨；<strong>半成品增減、半成品轉試吃、現貨增減</strong>記到「半成品增減」頁（換盒的情況：同一天同品號開頭的半成品減少會變成另一個品號的現貨增加，沿用原本的效期）；起算日的<strong>期初現貨</strong>沒有效期資料。<strong>實際揀貨</strong>登錄成出貨：<strong>①現貨（含當天轉好的）→ ②現貨不夠再直接扣半成品（效期最早的先）→ ③當天的生產轉現貨</strong>，當天的半成品入庫是出完貨剩下的。';
+const FLOW_SEMI = '<strong>半成品模式</strong>：<strong>半成品入庫</strong>登錄成有效期的半成品批次；<strong>半成品轉現貨</strong>照總表的實際數量，從效期最早的半成品轉成現貨（保留原本的批號與有效日期，轉多了沒出完的留到隔天）；<strong>生產轉現貨</strong>是當天生產直接做成的現貨；<strong>半成品增減、半成品轉試吃、現貨增減、總表的手動數字</strong>記到「半成品／現貨增減」頁；總表當天期初跟前一天期末對不上的<strong>隔夜差異</strong>也記到那頁，算在當天一開始（換盒的情況：同一天同品號開頭的半成品減少會變成另一個品號的現貨增加，沿用原本的效期）；起算日的<strong>期初現貨</strong>沒有效期資料。<strong>實際揀貨</strong>登錄成出貨：<strong>①現貨（含當天轉好的）→ ②現貨不夠再直接扣半成品（效期最早的先）→ ③當天的生產轉現貨</strong>，當天的半成品入庫是出完貨剩下的。';
 const FLOW_STOCK = '<strong>全現貨模式</strong>：沒有半成品，<strong>當天生產</strong>（總表的半成品入庫＋生產轉現貨）登錄成有效期的現貨批次；<strong>實際揀貨</strong>登錄成出貨：<strong>①既有現貨（效期最早的先）→ ②不夠再從當天生產直接取</strong>，剩下的就是現貨入庫。';
+// 隔夜差異：半成品／現貨各自的 ±（沒有就 —）
+const gapText = g => { const f = (v, l) => v ? `${l}${v > 0 ? '＋' : '－'}${fmt(Math.abs(clampQty(v)))}` : ''; return [f(clampQty(g.gSemi), '半'), f(clampQty(g.gStock), '現')].filter(Boolean).join(' ') || '—'; };
 function renderPortal() {
   const m = portalMeta(), from = syncFromDate(), sf = stockFromDate(), nowB = isStockModeDay(TODAY());
   $('portalFlow').innerHTML = `從入口網站（物管駕駛艙「總表」）帶入每日數字。${nowB ? FLOW_STOCK : FLOW_SEMI}${sf ? (nowB ? `（${sf} 以前的日期仍用半成品模式）` : `<br>${sf} 起改用${FLOW_STOCK}`) : ''}<br>`;
@@ -1171,11 +1191,11 @@ function renderPortal() {
   const ledger = calculateLedger(), by = new Map();
   for (const r of data.movements) {
     if (!r.id.startsWith('pt-')) continue;
-    if (!by.has(r.date)) by.set(r.date, { date: r.date, pQ: 0, qQ: 0, cQ: 0, sQ: 0, fromStock: 0, fromSemi: 0, fromToday: 0, short: 0, jSemi: 0, jStock: 0 });
+    if (!by.has(r.date)) by.set(r.date, { date: r.date, pQ: 0, qQ: 0, cQ: 0, sQ: 0, fromStock: 0, fromSemi: 0, fromToday: 0, short: 0, jSemi: 0, jStock: 0, gSemi: 0, gStock: 0 });
     const g = by.get(r.date), B = isStockModeDay(r.date);
     if (r.type === 'production') { if (r.pool === 'stock') g.qQ += r.quantity; else g.pQ += r.quantity; }
     else if (r.type === 'convert') g.cQ += r.quantity;
-    else if (r.type === 'adjust') { const v = r.dir === 'add' ? r.quantity : -r.quantity; if (r.pool === 'stock') g.jStock += v; else g.jSemi += v; }
+    else if (r.type === 'adjust') { const v = r.dir === 'add' ? r.quantity : -r.quantity, k = r.phase === 'open' ? 'g' : 'j'; if (r.pool === 'stock') g[k + 'Stock'] += v; else g[k + 'Semi'] += v; }
     else {
       // 扣現貨＝現貨（期初、之前留下的、當天半成品轉好的；全現貨模式含之前的有效期批次）
       // 扣半成品＝現貨不夠、直接從半成品扣（總表沒記到的轉現貨）；扣當天生產＝當天生產轉現貨／全現貨模式的當天生產
@@ -1190,7 +1210,7 @@ function renderPortal() {
   const rows = [...by.values()].sort((a, b) => cmp(b.date, a.date));
   $('portalCount').textContent = rows.length ? `共 ${rows.length} 天。要看明細，到「出貨扣批明細」或「每日生產紀錄」「每日出貨紀錄」按「明細」` : '入口網站帶入的生產與出貨紀錄，依日期彙總';
   const n = v => `<td class="num">${v ? fmt(clampQty(v)) : '—'}</td>`, sn = v => `<td class="num">${v ? (v > 0 ? '＋' : '－') + fmt(clampQty(Math.abs(v))) : '—'}</td>`;
-  $('portalTable').innerHTML = table(['日期', '流程', '半成品入庫／當天生產#', '生產轉現貨#', '半成品轉現貨#', '半成品增減#', '現貨增減#', '實際揀貨#', '扣現貨#', '扣半成品#', '扣當天生產#', '出貨缺口#'], rows.map(g => `<tr>${tdm(g.date)}${td(isStockModeDay(g.date) ? badge('全現貨', 'due') : badge('半成品', 'other'))}${n(g.pQ)}${n(g.qQ)}${n(g.cQ)}${sn(g.jSemi)}${sn(g.jStock)}${n(g.sQ)}${n(g.fromStock)}${n(g.fromSemi)}${n(g.fromToday)}<td class="num">${g.short ? badge(fmt(clampQty(g.short)), 'bad') : '—'}</td></tr>`), '還沒有從入口網站同步過');
+  $('portalTable').innerHTML = table(['日期', '流程', '半成品入庫／當天生產#', '生產轉現貨#', '半成品轉現貨#', '半成品增減#', '現貨增減#', '隔夜差異', '實際揀貨#', '扣現貨#', '扣半成品#', '扣當天生產#', '出貨缺口#'], rows.map(g => `<tr>${tdm(g.date)}${td(isStockModeDay(g.date) ? badge('全現貨', 'due') : badge('半成品', 'other'))}${n(g.pQ)}${n(g.qQ)}${n(g.cQ)}${sn(g.jSemi)}${sn(g.jStock)}${td(gapText(g))}${n(g.sQ)}${n(g.fromStock)}${n(g.fromSemi)}${n(g.fromToday)}<td class="num">${g.short ? badge(fmt(clampQty(g.short)), 'bad') : '—'}</td></tr>`), '還沒有從入口網站同步過');
 }
 
 /* ---------- 人員與權限（管理員）---------- */
