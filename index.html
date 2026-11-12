@@ -30,6 +30,7 @@
     <a class="nav-btn" href="#opening" data-view="opening"><span class="nav-ico" aria-hidden="true">▣</span>期初庫存建檔</a>
     <a class="nav-btn" href="#production" data-view="production"><span class="nav-ico" aria-hidden="true">▤</span>每日生產紀錄</a>
     <a class="nav-btn" href="#shipment" data-view="shipment"><span class="nav-ico" aria-hidden="true">⇧</span>每日出貨紀錄</a>
+    <a class="nav-btn" href="#adjust" data-view="adjust"><span class="nav-ico" aria-hidden="true">±</span>半成品增減</a>
     <a class="nav-btn need-portal" href="#portal" data-view="portal"><span class="nav-ico" aria-hidden="true">⟳</span>入口網站同步</a>
     <a class="nav-btn" href="#batches" data-view="batches"><span class="nav-ico" aria-hidden="true">▦</span>批次庫存與效期</a>
     <a class="nav-btn" href="#batchrule" data-view="batchrule"><span class="nav-ico" aria-hidden="true">#</span>批號產生</a>
@@ -103,6 +104,21 @@
     <div class="panel"><div class="panel-head"><div><h2>每日出貨紀錄</h2><p id="shipmentCount">0 筆資料</p></div><div class="toolbar"><input id="shipmentFilter" class="search" type="search" placeholder="搜尋日期／產品／出貨單" aria-label="搜尋出貨紀錄"><button type="button" class="btn small" data-action="csv-shipment">匯出 CSV</button></div></div><div id="shipmentTable" class="table-scroll"></div></div>
   </section>
 
+  <section id="adjust" class="section">
+    <p class="section-intro">總公司半成品當天有增加或減少（盤點差異、報廢、試吃等）就在這裡登錄，半成品庫存、轉現貨與出貨扣批會跟著重算。<strong>增加</strong>＝當天一開始加入一批半成品（填製作日期，有效日期＝製作日期＋保存天數）；<strong>減少</strong>＝當天結束時扣（出貨、轉現貨之後），可以指定哪一批，沒指定就從效期最早的扣，已過期的也能扣。</p>
+    <div class="panel form-area need-produce"><div class="panel-head"><div><h2>登錄半成品增減</h2><p>存檔前下方會先預覽結果</p></div></div><div class="panel-body"><form id="adjustForm" class="form-grid" novalidate>
+      <div class="field"><label for="adDate">日期 *</label><input id="adDate" type="date" required></div>
+      <div class="field"><label for="adDir">增加／減少 *</label><select id="adDir"><option value="add">增加半成品</option><option value="sub">減少半成品</option></select></div>
+      <div class="field span2"><label for="adProduct">產品 *</label><input id="adProduct" list="productNames" required placeholder="輸入品號或品名，從清單選擇" maxlength="80" autocomplete="off"></div>
+      <div class="field"><label for="adQty">數量 *</label><input id="adQty" type="number" inputmode="decimal" required step="0.001" min="0.001" placeholder="0"></div>
+      <div class="field" id="adMfgWrap"><label for="adMfg">製作日期 *</label><input id="adMfg" type="date"></div>
+      <div class="field" id="adExpWrap"><label for="adExp">有效日期 *</label><input id="adExp" type="date"></div>
+      <div class="field span2" id="adFromWrap" hidden><label for="adFrom">從哪一批扣</label><select id="adFrom"><option value="">自動：從效期最早的扣</option></select></div>
+      <div class="field span2"><label for="adNote">原因／備註</label><input id="adNote" list="adReasons" maxlength="180" placeholder="例如：盤點調整、報廢"><datalist id="adReasons"><option value="盤點調整"></option><option value="報廢"></option><option value="試吃／樣品"></option><option value="其他"></option></datalist></div>
+      <div class="field span4"><div id="adPreview" class="notice" hidden></div><div class="form-actions"><button type="submit" class="btn primary">＋ 儲存增減</button></div></div>
+    </form></div></div>
+    <div class="panel"><div class="panel-head"><div><h2>半成品增減紀錄</h2><p id="adjustCount"></p></div><div class="toolbar"><input id="adjustFilter" class="search" type="search" placeholder="搜尋日期／產品／原因" aria-label="搜尋半成品增減"><button type="button" class="btn small" data-action="csv-adjust">匯出 CSV</button></div></div><div id="adjustTable" class="table-scroll"></div></div>
+  </section>
   <section id="portal" class="section">
     <div class="notice"><span id="portalFlow"></span>用<strong>品號</strong>對應產品，只同步 <strong id="portalPrefixText">CK、CC、CA、CL、CS、KA</strong> 開頭的品號（品名有「擺盤」的不需要，一律略過）。入口網站要 Google 登入，所以用書籤一鍵帶過來，不用抄數字。</div>
     <div id="portalKpis" class="grid-kpi"></div>

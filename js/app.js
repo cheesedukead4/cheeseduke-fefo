@@ -99,6 +99,11 @@ function sanitizeRec(r) {
   const base = { id: String(r.id), seq: Number(r.seq) || 0, product, quantity: q, note: clean(r.note), by: clean(r.by), at: r.at || '', editBy: clean(r.editBy), editAt: r.editAt || '' };
   if (r.type === 'shipment') return isDate(r.date) ? { ...base, type: 'shipment', date: r.date, orderNo: clean(r.orderNo) } : null;
   if (r.type === 'convert') return isDate(r.date) ? { ...base, type: 'convert', date: r.date } : null; // 半成品轉現貨
+  if (r.type === 'adjust') { // 半成品增減：add 增加一批（有製作日期、有效日期）；sub 減少（可指定哪一批 fromMfg／fromExp）
+    if (!isDate(r.date) || (r.dir !== 'add' && r.dir !== 'sub')) return null;
+    if (r.dir === 'add') return isDate(r.manufactureDate) && isDate(r.expiryDate) ? { ...base, type: 'adjust', dir: 'add', date: r.date, batch: '—', manufactureDate: r.manufactureDate, expiryDate: r.expiryDate } : null;
+    return { ...base, type: 'adjust', dir: 'sub', date: r.date, fromMfg: isDate(r.fromMfg) ? r.fromMfg : '', fromExp: isDate(r.fromExp) ? r.fromExp : '' };
+  }
   if (!isDate(r.manufactureDate) || !isDate(r.expiryDate)) return null;
   // 還沒轉現貨的半成品沒有批號，只看製作日期與有效日期；現貨（期初現貨、生產轉現貨、全現貨模式的當天生產）才有批號
   const semi = r.pool !== 'stock' && !(r.type === 'production' && isStockModeDay(r.date));
@@ -131,6 +136,7 @@ function recordBody(rec) {
   if (rec.editBy) { b.editBy = rec.editBy; b.editAt = rec.editAt; }
   if (rec.type === 'shipment') { b.date = rec.date; b.orderNo = rec.orderNo || ''; }
   else if (rec.type === 'convert') b.date = rec.date;
+  else if (rec.type === 'adjust') { b.date = rec.date; b.dir = rec.dir; if (rec.dir === 'add') { b.manufactureDate = rec.manufactureDate; b.expiryDate = rec.expiryDate; } else { b.fromMfg = rec.fromMfg || ''; b.fromExp = rec.fromExp || ''; } }
   else { b.batch = rec.batch; b.manufactureDate = rec.manufactureDate; b.expiryDate = rec.expiryDate; if (rec.type === 'opening') b.entryDate = rec.entryDate; else b.date = rec.date; if (rec.pool === 'stock') b.pool = 'stock'; }
   return b;
 }
@@ -165,7 +171,8 @@ function validateImport(obj) {
   if (!isValidState(obj)) throw Error('這不是本系統的 JSON 備份檔');
   for (const row of [...obj.opening, ...obj.movements]) {
     if (!row || !row.id || !row.product || !(Number(row.quantity) > 0) || !Number.isFinite(Number(row.quantity)) || !(Number(row.quantity) <= 1e12)) throw Error('備份內有無效的數量或產品');
-    if (row.type === 'shipment') { if (!isDate(row.date)) throw Error('出貨日期格式錯誤'); }
+    if (row.type === 'shipment' || row.type === 'convert' || (row.type === 'adjust' && row.dir === 'sub')) { if (!isDate(row.date)) throw Error('出貨／轉現貨／增減日期格式錯誤'); }
+    else if (row.type === 'adjust') { if (!isDate(row.date) || !isDate(row.manufactureDate) || !isDate(row.expiryDate)) throw Error('半成品增加的日期格式錯誤'); }
     else if (!isDate(row.expiryDate) || !isDate(row.manufactureDate) || !isDate(row.entryDate || row.date)) throw Error('庫存日期格式錯誤');
   }
   for (const p of obj.products) if (!p.name || !p.unit) throw Error('產品資料不完整');
@@ -177,15 +184,15 @@ function exportState() {
 }
 
 /* ---------- 庫存引擎：依日期重放所有事件；同日先入庫，再依出貨順序扣最早到期者 ---------- */
-// 同一天的順序：入庫（期初、生產）→ 半成品轉現貨 → 出貨
+// 同一天的順序：入庫（期初、生產、半成品增加）→ 半成品轉現貨 → 出貨 → 半成品減少（當天結束時盤點扣）
 // 批次 pool：'stock' 現貨、'semi' 半成品（全現貨模式的有效期批次也記成 semi，但出貨時一律當現貨看）
 // lot.used＝已扣（出貨＋轉成現貨）、lot.shipped＝只算出貨、lot.converted＝轉成現貨的量
 function calculateLedger(asOf = '9999-12-31', st = data) {
   const events = [], prio = { production: 0, convert: 1, shipment: 2 };
   for (const x of st.opening) if (x.entryDate <= asOf) events.push({ date: x.entryDate, priority: 0, seq: x.seq || 0, type: 'opening', item: x });
-  for (const x of st.movements) if (x.date <= asOf) events.push({ date: x.date, priority: prio[x.type] ?? 2, seq: x.seq || 0, type: x.type, item: x });
+  for (const x of st.movements) if (x.date <= asOf) events.push({ date: x.date, priority: x.type === 'adjust' ? (x.dir === 'add' ? 0 : 3) : prio[x.type] ?? 2, seq: x.seq || 0, type: x.type, item: x });
   events.sort((a, b) => cmp(a.date, b.date) || a.priority - b.priority || a.seq - b.seq || cmp(String(a.item.id), String(b.item.id)));
-  const lots = [], shipments = new Map(), converts = new Map(), byProduct = new Map();
+  const lots = [], shipments = new Map(), converts = new Map(), adjusts = new Map(), byProduct = new Map();
   const addLot = lot => { lots.push(lot); if (!byProduct.has(lot.product)) byProduct.set(lot.product, []); byProduct.get(lot.product).push(lot); };
   const prior = (l, d) => l.source === 'opening' || l.entryDate < d;
   const noExpFirst = (a, b) => (a.expiryDate === NO_EXPIRY ? 0 : 1) - (b.expiryDate === NO_EXPIRY ? 0 : 1); // 期初現貨沒有效期資料，當最舊的先出
@@ -194,6 +201,15 @@ function calculateLedger(asOf = '9999-12-31', st = data) {
     const x = e.item;
     if (e.type === 'opening' || e.type === 'production') {
       addLot({ id: x.id, source: e.type, pool: x.pool === 'stock' ? 'stock' : 'semi', product: x.product, batch: x.batch, manufactureDate: x.manufactureDate, expiryDate: x.expiryDate, entryDate: e.date, quantity: Number(x.quantity), used: 0, shipped: 0, converted: 0, remaining: Number(x.quantity), seq: x.seq || 0, unit: getUnit(x.product, st) });
+      continue;
+    }
+    if (e.type === 'adjust') {
+      if (x.dir === 'add') { addLot({ id: x.id, source: 'adjust', pool: 'semi', product: x.product, batch: '—', manufactureDate: x.manufactureDate, expiryDate: x.expiryDate, entryDate: e.date, quantity: Number(x.quantity), used: 0, shipped: 0, converted: 0, adjusted: 0, remaining: Number(x.quantity), seq: x.seq || 0, unit: getUnit(x.product, st) }); continue; }
+      // 半成品減少：指定那一批（製作日期／有效日期）就只扣那批，否則從效期最早的扣；已過期的也可以扣
+      const from = (byProduct.get(x.product) || []).filter(l => l.pool === 'semi' && l.remaining > 1e-7 && l.entryDate <= e.date && (!x.fromMfg || l.manufactureDate === x.fromMfg) && (!x.fromExp || l.expiryDate === x.fromExp)).sort(tie);
+      const required = Number(x.quantity), parts = []; let need = required;
+      for (const lot of from) { if (need <= 1e-7) break; const q = clampQty(Math.min(need, lot.remaining)); lot.remaining = clampQty(lot.remaining - q); lot.used = clampQty(lot.used + q); lot.adjusted = clampQty((lot.adjusted || 0) + q); need = clampQty(need - q); parts.push({ manufactureDate: lot.manufactureDate, expiryDate: lot.expiryDate, quantity: q }); }
+      adjusts.set(x.id, { required, done: clampQty(required - need), shortage: clampQty(need), parts });
       continue;
     }
     const usable = l => l.remaining > 1e-7 && l.expiryDate >= e.date && l.manufactureDate <= e.date && l.entryDate <= e.date;
@@ -223,10 +239,10 @@ function calculateLedger(asOf = '9999-12-31', st = data) {
     for (const lot of eligible) { if (remaining <= 1e-7) break; const amount = clampQty(Math.min(remaining, lot.remaining)); lot.remaining = clampQty(lot.remaining - amount); lot.used = clampQty(lot.used + amount); lot.shipped = clampQty(lot.shipped + amount); remaining = clampQty(remaining - amount); allocations.push({ lotId: lot.id, pool: lot.pool, source: lot.source, product: lot.product, batch: lot.batch, manufactureDate: lot.manufactureDate, expiryDate: lot.expiryDate, entryDate: lot.entryDate, quantity: amount }); }
     shipments.set(x.id, { required, shipped: clampQty(required - remaining), shortage: clampQty(remaining), allocations });
   }
-  return { lots, shipments, converts };
+  return { lots, shipments, converts, adjusts };
 }
 // 依「產品＋現貨／半成品＋批號＋製作日＋有效日」彙整；inQty＝入庫（期初＋生產＋轉入現貨），shipped＝出貨，converted＝轉成現貨
-function groupLots(ledger) { const g = new Map(); for (const lot of ledger.lots) { const key = JSON.stringify([lot.product, lot.pool, lot.batch, lot.manufactureDate, lot.expiryDate]); if (!g.has(key)) g.set(key, { product: lot.product, pool: lot.pool, batch: lot.batch, manufactureDate: lot.manufactureDate, expiryDate: lot.expiryDate, opening: 0, production: 0, convert: 0, inQty: 0, used: 0, shipped: 0, converted: 0, remaining: 0, unit: lot.unit }); const r = g.get(key); r[lot.source] = clampQty((r[lot.source] || 0) + lot.quantity); r.inQty = clampQty(r.inQty + lot.quantity); r.used = clampQty(r.used + lot.used); r.shipped = clampQty(r.shipped + lot.shipped); r.converted = clampQty(r.converted + lot.converted); r.remaining = clampQty(r.remaining + lot.remaining); } return [...g.values()].sort((a, b) => productOrder(a.product, b.product) || cmp(a.expiryDate, b.expiryDate) || cmp(a.pool, b.pool) || cmp(a.manufactureDate, b.manufactureDate)); }
+function groupLots(ledger) { const g = new Map(); for (const lot of ledger.lots) { const key = JSON.stringify([lot.product, lot.pool, lot.batch, lot.manufactureDate, lot.expiryDate]); if (!g.has(key)) g.set(key, { product: lot.product, pool: lot.pool, batch: lot.batch, manufactureDate: lot.manufactureDate, expiryDate: lot.expiryDate, opening: 0, production: 0, convert: 0, adjust: 0, inQty: 0, used: 0, shipped: 0, converted: 0, adjusted: 0, remaining: 0, unit: lot.unit }); const r = g.get(key); r[lot.source] = clampQty((r[lot.source] || 0) + lot.quantity); r.inQty = clampQty(r.inQty + lot.quantity); r.used = clampQty(r.used + lot.used); r.shipped = clampQty(r.shipped + lot.shipped); r.converted = clampQty(r.converted + lot.converted); r.adjusted = clampQty(r.adjusted + (lot.adjusted || 0)); r.remaining = clampQty(r.remaining + lot.remaining); } return [...g.values()].sort((a, b) => productOrder(a.product, b.product) || cmp(a.expiryDate, b.expiryDate) || cmp(a.pool, b.pool) || cmp(a.manufactureDate, b.manufactureDate)); }
 // 全 App 共用的品號排序：品號開頭 CK（6吋）→ CC（4吋）→ CA（小小公爵）→ CS（方盒）→ CL（生巧），其他開頭（例如 KA）排在後面，同開頭內照品號
 const SORT_PREFIXES = ['CK', 'CC', 'CA', 'CS', 'CL'];
 function prefixRank(name) { const px = String(name).split(/[-| ]/)[0].toUpperCase(), i = SORT_PREFIXES.indexOf(px); return i >= 0 ? i : SORT_PREFIXES.length; }
@@ -255,6 +271,7 @@ const manageCol = type => can(permFor(type)) ? ['管理'] : [];
 const manageCell = (kind, id) => String(id).startsWith('pt-') ? (can(permFor(kind)) ? td('<span class="pill other" title="入口網站同步的數字，要修改請在入口網站改後再同步">入口網站</span>') : '') : can(permFor(kind)) ? td(`<div class="segment">${kind === 'opening' ? `<button type="button" class="btn small" data-action="edit-${kind}" data-id="${esc(id)}">修改</button>` : ''}<button type="button" class="btn small danger" data-action="delete-${kind}" data-id="${esc(id)}">刪除</button></div>`) : '';
 
 const VIEWS = { dashboard: ['營運總覽', '每日生產、出貨及批次有效日期，即時統整。'], opening: ['期初庫存建檔', '原始庫存按製作日期分開管理，不需擔心同批不同效期。'], production: ['每日生產紀錄', '入口網站同步帶入的每日生產，自動增加可出貨批次庫存。'], shipment: ['每日出貨紀錄', '入口網站同步帶入的實際揀貨，自動從有效期最近的庫存開始扣除。'], portal: ['入口網站同步', '從入口網站總表帶入每日半成品入庫（生產）與實際揀貨（出貨）。'], batches: ['批次庫存與效期', '依製作日期和有效日期追蹤每一批剩餘量。'], allocations: ['出貨扣批明細', '每張出貨單實際扣除了哪些製作日期，一目了然。'], products: ['產品庫存總表', '總庫存、近效期及過期量依產品清楚呈現。'], manage: ['資料與設定', '備份、效期預警及產品基本設定。'], users: ['人員與權限', '管理誰可以登入，以及每個人能做的事。'] };
+VIEWS.adjust = ['半成品增減', '總公司半成品的增加與減少（盤點、報廢等），庫存、轉現貨與出貨扣批跟著重算。'];
 VIEWS.batchrule = ['批號產生', '依批號規則，每天生產的自動帶入批號與有效日期。'];
 for (const x of SHOPS) VIEWS['shop-' + x.id] = [`${x.name}門市庫存`, `${x.name}門市的入貨批號、銷售、報廢與到期日（入貨日起算），先到期先出。`];
 function showView(view) {
@@ -272,7 +289,7 @@ let renderQueued = false;
 function scheduleRender() { if (renderQueued) return; renderQueued = true; setTimeout(() => { renderQueued = false; render(); }, 0); }
 function render() {
   const today = TODAY(), current = calculateLedger(today), full = calculateLedger(), groups = groupLots(current), prod = productSummary(current, today);
-  renderDashboard(today, current, groups, prod); renderOpening(); renderProduction(); renderShipments(full); renderBatches(groups, today); renderAllocations(full); renderProducts(prod); renderSettings(); renderPortal(); renderShops(today); renderBatchRule(today);
+  renderDashboard(today, current, groups, prod); renderOpening(); renderProduction(); renderShipments(full); renderBatches(groups, today); renderAllocations(full); renderProducts(prod); renderSettings(); renderPortal(); renderShops(today); renderBatchRule(today); renderAdjust(full);
   $('productNames').innerHTML = byProductName(data.products).map(p => `<option value="${esc(p.name)}"></option>`).join('');
   const empty = !data.opening.length && !data.movements.length;
   $('welcome').hidden = loading() || !empty || !(isAdmin() || can('produce'));
@@ -518,7 +535,7 @@ function saveOpening(e) { e.preventDefault(); if (!can('produce')) return; act((
   resetOpening(); toast('期初庫存已儲存，其他工作表已同步更新');
 }); }
 function resetOpening() { $('openingForm').reset(); $('oMfg').value = TODAY(); $('oEntry').value = TODAY(); $('oUnit').value = '個'; $('oShelf').value = data.settings.defaultShelf; autoExpiry('o'); editOpening = null; $('openingFormTitle').textContent = '新增期初庫存'; $('oSubmit').textContent = '＋ 儲存期初庫存'; $('oCancel').classList.add('hide'); }
-const resetForms = () => { resetOpening(); SHOPS.forEach(x => resetShopForm(x.id)); };
+const resetForms = () => { resetOpening(); resetAdjust(); SHOPS.forEach(x => resetShopForm(x.id)); };
 const smooth = () => window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches ? 'auto' : 'smooth';
 function populateEdit(type, id) {
   if (type === 'opening') { const x = data.opening.find(x => x.id === id); if (!x) return; editOpening = id; for (const [f, v] of Object.entries({ oProduct: x.product, oUnit: getUnit(x.product), oQty: x.quantity, oMfg: x.manufactureDate, oEntry: x.entryDate, oExpiry: x.expiryDate, oNote: x.note || '' })) $(f).value = v; $('oShelf').value = getProduct(x.product)?.shelfDays ?? data.settings.defaultShelf; $('openingFormTitle').textContent = '修改期初庫存'; $('oSubmit').textContent = '儲存修改'; $('oCancel').classList.remove('hide'); go('opening'); setTimeout(() => $('openingForm').scrollIntoView({ block: 'center', behavior: smooth() }), 30); return; }
@@ -580,8 +597,9 @@ function csvData(kind) {
   if (kind === 'opening') return ['期初庫存', ['入帳日期', '產品', '單位', '批號', '製作日期', '有效日期', '原始庫存', '備註', '登錄人'], [...data.opening].sort((a, b) => cmp(b.entryDate, a.entryDate) || productOrder(a.product, b.product)).map(x => [x.entryDate, x.product, getUnit(x.product), x.batch, x.manufactureDate, expShow(x.expiryDate), x.quantity, x.note || '', x.by || ''])];
   if (kind === 'production') return ['每日生產', ['生產入庫日期', '產品', '單位', '批號', '製作日期', '有效日期', '生產量', '備註', '登錄人'], data.movements.filter(x => x.type === 'production').sort((a, b) => cmp(b.date, a.date) || productOrder(a.product, b.product)).map(x => [x.date, x.product, getUnit(x.product), x.batch, x.manufactureDate, expShow(x.expiryDate), x.quantity, x.note || '', x.by || ''])];
   if (kind === 'shipment') return ['每日出貨', ['出貨日期', '產品', '單位', '出貨單號', '需求量', '實際出貨', '出貨缺口', '備註', '登錄人'], data.movements.filter(x => x.type === 'shipment').sort((a, b) => cmp(b.date, a.date) || productOrder(a.product, b.product)).map(x => { const s = led.shipments.get(x.id); return [x.date, x.product, getUnit(x.product), x.orderNo || '', x.quantity, s?.shipped || 0, s?.shortage || 0, x.note || '', x.by || '']; })];
-  if (kind === 'batches') return ['批次庫存', ['產品', '單位', '類別', '批號', '製作日期', '有效日期', '期初庫存', '新增生產', '半成品轉入', '已出貨', '轉成現貨', '剩餘量', '狀態'], groups.map(x => [x.product, x.unit, poolLabel(x.pool), x.batch, x.manufactureDate, expShow(x.expiryDate), x.opening, x.production, x.convert, x.shipped, x.converted, x.remaining, expiryStatus(x.expiryDate, x.remaining).label])];
+  if (kind === 'batches') return ['批次庫存', ['產品', '單位', '類別', '批號', '製作日期', '有效日期', '期初庫存', '新增生產', '半成品轉入', '半成品增加', '已出貨', '轉成現貨', '半成品減少', '剩餘量', '狀態'], groups.map(x => [x.product, x.unit, poolLabel(x.pool), x.batch, x.manufactureDate, expShow(x.expiryDate), x.opening, x.production, x.convert, x.adjust, x.shipped, x.converted, x.adjusted, x.remaining, expiryStatus(x.expiryDate, x.remaining).label])];
   if (kind === 'allocation') return ['出貨扣批明細', ['出貨日期', '出貨單號', '產品', '單位', '批號', '製作日期', '有效日期', '扣貨量', '類別'], allocationRows(led).map(x => [x.date, x.orderNo, x.product, x.unit, x.batch, x.manufactureDate, expShow(x.expiryDate), x.quantity, x.kind === 'shortage' ? '缺口' : '已分配'])];
+  if (kind === 'adjust') return ['半成品增減', ['日期', '產品', '單位', '增加／減少', '數量', '製作日期', '有效日期', '指定扣除的批', '實際扣除', '缺口', '原因／備註', '登錄人'], data.movements.filter(r => r.type === 'adjust').sort((a, b) => cmp(b.date, a.date) || productOrder(a.product, b.product)).map(r => { const o = led.adjusts.get(r.id); return [r.date, r.product, getUnit(r.product), r.dir === 'add' ? '增加' : '減少', r.quantity, r.manufactureDate || '', r.expiryDate || '', r.fromMfg ? `製 ${r.fromMfg}／效期 ${r.fromExp}` : '', o ? adjPartsText(o.parts) : '', o ? o.shortage : '', r.note, r.by]; })];
   if (kind === 'shop') { const outs = new Map(); for (const x of SHOPS) for (const [k, v] of shopLedger(x.id).outs) outs.set(k, v); return ['門市紀錄', ['門市', '日期', '類別', '產品', '單位', '批號', '數量', '門市到期日', '扣除的批號', '缺口', '備註', '登錄人'], [...data.shops].sort((a, b) => SHOPS.findIndex(x => x.id === a.shop) - SHOPS.findIndex(x => x.id === b.shop) || cmp(b.date, a.date) || productOrder(a.product, b.product)).map(r => { const o = outs.get(r.id); return [shopName(r.shop), r.date, SHOP_TYPES[r.type], r.product, getUnit(r.product), r.batch, r.quantity, r.expiryDate || '', o ? shopPartsText(o.parts) : '', o ? o.short : '', r.note, r.by]; })]; }
   return ['產品庫存總表', ['產品', '單位', '期初庫存', '累計生產', '累計扣貨', '可用庫存', '現貨', '半成品', '過期量', '近效期量', '最近有效日期', '低庫存警戒量'], products.map(x => [x.name, x.unit, x.opened, x.produced, x.used, x.usable, x.stock, x.semi, x.expired, x.warning, x.oldest, x.lowStock])];
 }
@@ -591,9 +609,93 @@ let xlsxPromise = null;
 function loadXLSX() { if (window.XLSX) return Promise.resolve(window.XLSX); if (!xlsxPromise) xlsxPromise = new Promise((res, rej) => { const s = document.createElement('script'); s.src = 'https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js'; s.onload = () => window.XLSX ? res(window.XLSX) : rej(Error('Excel 元件載入失敗')); s.onerror = () => { xlsxPromise = null; s.remove(); rej(Error('Excel 元件載入失敗（需要網路），請改用各表的「匯出 CSV」')); }; document.head.appendChild(s); }); return xlsxPromise; }
 async function exportXlsx() {
   toast('正在產生 Excel 檔…');
-  try { const XLSX = await loadXLSX(); const wb = XLSX.utils.book_new(); for (const kind of ['products', 'batches', 'opening', 'production', 'shipment', 'allocation', 'shop']) { const [name, headers, records] = csvData(kind); const ws = XLSX.utils.aoa_to_sheet([headers, ...records]); ws['!cols'] = headers.map(h => ({ wch: Math.max(10, h.length * 2 + 2) })); XLSX.utils.book_append_sheet(wb, ws, name); }
+  try { const XLSX = await loadXLSX(); const wb = XLSX.utils.book_new(); for (const kind of ['products', 'batches', 'opening', 'production', 'shipment', 'adjust', 'allocation', 'shop']) { const [name, headers, records] = csvData(kind); const ws = XLSX.utils.aoa_to_sheet([headers, ...records]); ws['!cols'] = headers.map(h => ({ wch: Math.max(10, h.length * 2 + 2) })); XLSX.utils.book_append_sheet(wb, ws, name); }
     const buf = XLSX.write(wb, { bookType: 'xlsx', type: 'array' }); downloadFile(`生產出貨庫存_完整明細_${TODAY()}.xlsx`, new Blob([buf], { type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' }), null, 'Excel 明細已下載（六張工作表）'); }
   catch (err) { toast(err.message || 'Excel 產生失敗', true); }
+}
+
+/* ---------- 半成品增減（總公司） ----------
+   增加：當天一開始加入一批半成品（填製作日期，有效日期＝製作日期＋保存天數，可改），跟其他半成品一樣先到期先出。
+   減少：當天結束時扣（出貨、轉現貨之後），可指定哪一批（製作日期／有效日期），沒指定就從效期最早的扣（已過期的也能扣）；不夠扣的列為缺口。 */
+// 某個產品在某天結束時還有的半成品批（給「減少」選）
+function semiLotsOf(product, date) {
+  const L = calculateLedger(isDate(date) ? date : '9999-12-31'), m = new Map();
+  for (const l of L.lots) if (l.product === product && l.pool === 'semi' && l.remaining > 1e-7) { const k = l.manufactureDate + '|' + l.expiryDate, x = m.get(k) || { mfg: l.manufactureDate, exp: l.expiryDate, left: 0 }; x.left = clampQty(x.left + l.remaining); m.set(k, x); }
+  return [...m.values()].sort((a, b) => cmp(a.exp, b.exp) || cmp(a.mfg, b.mfg));
+}
+const adjPartsText = parts => parts.map(p => `製 ${md(p.manufactureDate)}（效期 ${md(p.expiryDate)}）×${fmt(p.quantity)}`).join('、');
+function adjFormSync(fillExpiry) {
+  const dir = $('adDir').value, date = $('adDate').value, p = getProduct($('adProduct').value), box = $('adPreview');
+  $('adMfgWrap').hidden = $('adExpWrap').hidden = dir !== 'add'; $('adFromWrap').hidden = dir !== 'sub';
+  if (dir === 'add') {
+    if (!$('adMfg').value && isDate(date)) $('adMfg').value = date;
+    if (fillExpiry && p && isDate($('adMfg').value)) $('adExp').value = addDays($('adMfg').value, p.shelfDays);
+  }
+  if (dir === 'sub') {
+    const cur = $('adFrom').value, lots = p && isDate(date) ? semiLotsOf(p.name, date) : [];
+    $('adFrom').innerHTML = '<option value="">自動：從效期最早的扣</option>' + lots.map(l => `<option value="${esc(l.mfg + '|' + l.exp)}">製 ${esc(l.mfg)}・效期 ${esc(l.exp)}・剩 ${esc(fmt(l.left))}${l.exp < date ? '（已過期）' : ''}</option>`).join('');
+    if ([...$('adFrom').options].some(o => o.value === cur)) $('adFrom').value = cur;
+  }
+  const q = Number($('adQty').value);
+  if (!p || !isDate(date) || !(q > 0)) { box.hidden = true; return; }
+  if (dir === 'add') { box.hidden = false; box.className = 'notice'; box.textContent = `${date} 增加「${p.name}」半成品 ${fmt(q)} ${getUnit(p.name)}：製作 ${$('adMfg').value || '—'}、有效日期 ${$('adExp').value || '—'}`; return; }
+  const [fm, fe] = ($('adFrom').value || '|').split('|');
+  const rec = { id: '__preview__', type: 'adjust', dir: 'sub', date, product: p.name, quantity: q, fromMfg: fm, fromExp: fe, seq: Date.now() };
+  const o = calculateLedger('9999-12-31', { ...data, movements: [...data.movements, rec] }).adjusts.get('__preview__');
+  box.hidden = false; box.className = `notice${o.shortage ? ' warning' : ''}`;
+  box.textContent = `預估會扣（當天出貨、轉現貨之後）：${adjPartsText(o.parts) || '沒有可扣的半成品'}${o.shortage ? `；缺 ${fmt(o.shortage)} ${getUnit(p.name)}` : ''}`;
+}
+function resetAdjust(keep = false) {
+  if (!keep) { $('adDate').value = TODAY(); $('adDir').value = 'add'; $('adProduct').value = ''; }
+  for (const id of ['adQty', 'adMfg', 'adExp', 'adNote']) $(id).value = '';
+  adjFormSync(true);
+}
+function saveAdjust(e) { e.preventDefault(); if (!can('produce')) return; act(() => {
+  const date = $('adDate').value, dir = $('adDir').value, product = clean($('adProduct').value), quantity = inputPositive('adQty'), note = clean($('adNote').value);
+  if (!isDate(date) || !product) throw Error('請輸入日期與產品');
+  if (!getProduct(product)) throw Error('此產品尚未建檔，請從清單選擇（可輸入品號或品名搜尋）');
+  const rec = { id: uid(), type: 'adjust', dir, seq: nextSeq(), date, product, quantity, note, ...stampNew() };
+  if (dir === 'add') {
+    const mfg = $('adMfg').value, exp = $('adExp').value;
+    if (!isDate(mfg) || !isDate(exp)) throw Error('增加要填製作日期與有效日期');
+    if (exp < mfg) throw Error('有效日期不能早於製作日期');
+    if (mfg > date) throw Error('製作日期不能晚於增減日期');
+    Object.assign(rec, { batch: '—', manufactureDate: mfg, expiryDate: exp });
+  } else { const [fm, fe] = ($('adFrom').value || '|').split('|'); rec.fromMfg = isDate(fm) ? fm : ''; rec.fromExp = isDate(fe) ? fe : ''; }
+  const o = dir === 'sub' ? calculateLedger('9999-12-31', { ...data, movements: [...data.movements, rec] }).adjusts.get(rec.id) : null;
+  storeRecord(rec); resetAdjust(true);
+  toast(o && o.shortage ? `已登錄減少：扣 ${fmt(o.done)}，缺 ${fmt(o.shortage)}（半成品不夠）` : `已登錄半成品${dir === 'add' ? '增加' : '減少'} ${fmt(quantity)} ${getUnit(product)}，庫存已重算`, !!(o && o.shortage), o && o.shortage ? 7000 : 4200);
+}); }
+const adjChip = (r, o) => {
+  const u = esc(getUnit(r.product)), short = o && o.shortage > 0, add = r.dir === 'add';
+  const tip = `${r.date}｜${add ? '增加' : '減少'} ${fmt(r.quantity)}${add ? `｜製作 ${r.manufactureDate}｜效期 ${r.expiryDate}` : `｜扣 ${(o && adjPartsText(o.parts)) || '—'}${short ? '｜缺 ' + fmt(o.shortage) : ''}`}${r.note ? '｜' + r.note : ''}${r.by ? '｜' + r.by : ''}`;
+  return `<span class="pill ${add ? 'ok' : short ? 'bad' : 'expired'} exp-chip" title="${esc(tip)}"><span class="mono">${esc(md(r.date))}</span> ${add ? '＋' : '－'}${esc(fmt(r.quantity))} ${u}${add ? `（製 ${esc(md(r.manufactureDate))}）` : short ? `（缺 ${esc(fmt(o.shortage))}）` : ''}${r.note ? ` ${esc(r.note)}` : ''}</span>`;
+};
+function renderAdjust(ledger) {
+  const recs = data.movements.filter(r => r.type === 'adjust');
+  const groups = groupByProduct(recs, $('adjustFilter').value, ['date', 'note', 'by', 'manufactureDate']);
+  const sumDir = (list, d) => sumQ(list.filter(r => r.dir === d));
+  $('adjustCount').textContent = `共 ${groups.length} 項產品、${recs.length} 筆增減；每個品號一列，日期新的在前（綠＝增加、紅＝減少），點「明細」看每一筆並刪除`;
+  $('adjustTable').innerHTML = table(['產品', '增減紀錄（日期新到舊）', '增加#', '減少#', '缺口#', '明細'], groups.map(g => {
+    const short = sumQ(g.recs, r => (ledger.adjusts.get(r.id) || {}).shortage || 0), more = g.recs.length > CHIP_MAX ? `<button type="button" class="pill other exp-chip linkchip" data-action="adjust-detail" data-id="${esc(g.product)}">還有 ${g.recs.length - CHIP_MAX} 筆…</button>` : '';
+    return `<tr>${td(`<strong>${esc(g.product)}</strong>`)}<td class="exp-cell"><div class="exp-chips">${g.recs.slice(0, CHIP_MAX).map(r => adjChip(r, ledger.adjusts.get(r.id))).join('')}${more}</div></td><td class="num">${fmt(sumDir(g.recs, 'add'))}</td><td class="num">${fmt(sumDir(g.recs, 'sub'))}</td><td class="num">${short ? badge(fmt(short), 'bad') : '—'}</td>${td(`<button type="button" class="btn small" data-action="adjust-detail" data-id="${esc(g.product)}">明細</button>`)}</tr>`;
+  }), '還沒有半成品增減紀錄');
+}
+async function openAdjustDetail(product) {
+  const L = calculateLedger(), u = esc(getUnit(product)), canEdit = can('produce');
+  const rows = data.movements.filter(r => r.type === 'adjust' && r.product === product).sort((a, b) => cmp(b.date, a.date) || b.seq - a.seq);
+  const html = table(['日期', '增減', '數量#', '製作／有效日期或實際扣除', '缺口#', '原因／備註', '登錄人', ...(canEdit ? ['管理'] : [])], rows.map(r => {
+    const o = L.adjusts.get(r.id), add = r.dir === 'add';
+    return `<tr>${tdm(r.date)}${td(badge(add ? '增加' : '減少', add ? 'ok' : 'expired'))}<td class="num">${fmt(r.quantity)} ${u}</td>${td(esc(add ? `製作 ${r.manufactureDate}・效期 ${r.expiryDate}` : `${r.fromMfg ? `指定 製 ${r.fromMfg}・效期 ${r.fromExp}｜` : ''}${(o && adjPartsText(o.parts)) || '—'}`))}<td class="num">${o && o.shortage ? fmt(o.shortage) : '—'}</td>${td(esc(r.note || '—'))}${tdWho(r)}${canEdit ? td(`<button type="button" class="btn small danger" data-action="adjust-delete" data-id="${esc(r.id)}">刪除</button>`) : ''}</tr>`;
+  }));
+  await modal({ title: `「${product}」的半成品增減（${rows.length} 筆）`, html: `<div class="table-scroll">${html}</div>`, ok: '關閉', wide: true, noCancel: true });
+}
+async function deleteAdjust(id) {
+  closeModal();
+  if (!can('produce')) return;
+  const r = data.movements.find(x => x.id === id && x.type === 'adjust'); if (!r) return;
+  if (!await modal({ title: '刪除這筆半成品增減？', html: `<p>${esc(`${r.date}｜${r.dir === 'add' ? '增加' : '減少'} ${r.product} ${fmt(r.quantity)} ${getUnit(r.product)}${r.note ? '｜' + r.note : ''}`)}</p><p class="modal-note">刪除後，半成品庫存、轉現貨與出貨扣批會重新計算。</p>`, ok: '刪除', danger: true })) return;
+  act(() => { FEStore.remove('moves', r.id); toast('已刪除，庫存已重算'); });
 }
 
 /* ---------- 門市庫存（A11、京站、東橋，各一頁） ----------
@@ -1095,6 +1197,8 @@ async function handleAction(el) {
   if (a === 'delete-user') { const u = (U.list || []).find(x => x.email === id); if (!u || !await modal({ title: '刪除這位人員？', html: `<p>${esc(u.name || u.email)}（${esc(u.email)}）會馬上被登出，之後不能再登入。他登錄過的資料會保留。</p>`, ok: '刪除', danger: true })) return; return userCall('userDelete', { email: u.email }, '已刪除'); }
   if (a === 'alloc-day') { if (isDate(el.dataset.date)) { allocDate = el.dataset.date; scheduleRender(); } return; }
   if (a === 'edit-bcode') return editBatchCode(id);
+  if (a === 'adjust-detail') return openAdjustDetail(id);
+  if (a === 'adjust-delete') return deleteAdjust(id);
   if (a === 'shop-rule') return editShopRule();
   if (a === 'shop-detail') return openShopDetail(el.dataset.shop, id);
   if (a === 'shop-delete') return deleteShopRec(el.dataset.shop, id);
@@ -1125,6 +1229,11 @@ function bind() {
   for (const id of ['openingFilter', 'productionFilter', 'shipmentFilter', 'batchFilter', 'allocationFilter', 'productFilter', 'settingFilter', 'batchLive', 'productLive']) $(id).addEventListener('input', scheduleRender);
   $('batchSeg').addEventListener('click', e => { const b = e.target.closest('[data-bmode]'); if (!b) return; batchMode = b.dataset.bmode; scheduleRender(); });
   $('openingForm').addEventListener('submit', saveOpening);
+  $('adjustForm').addEventListener('submit', saveAdjust);
+  for (const id of ['adDir', 'adDate', 'adProduct', 'adMfg']) $(id).addEventListener('change', () => adjFormSync(id !== 'adDate'));
+  for (const id of ['adQty', 'adFrom']) $(id).addEventListener('input', () => adjFormSync(false));
+  $('adFrom').addEventListener('change', () => adjFormSync(false));
+  $('adjustFilter').addEventListener('input', scheduleRender);
   for (const id of ['brProduct', 'brDate', 'brListDate', 'brFilter']) $(id).addEventListener('input', scheduleRender);
   $('allocationDate').addEventListener('change', e => { if (isDate(e.target.value)) { allocDate = e.target.value; scheduleRender(); } });
   renderBatchRefs();
