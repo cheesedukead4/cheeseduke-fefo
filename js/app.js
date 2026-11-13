@@ -828,7 +828,7 @@ function factoryBatches(product) {
 function shopSectionHtml(s) {
   const id = s.id, n = esc(s.name);
   return `<section id="shop-${id}" class="section">
-    <div class="notice"><span id="shopRule-${id}"></span> <button type="button" class="btn small need-setting" data-action="shop-rule">修改門市規則</button> <button type="button" class="btn small need-storeout" data-action="store-out" title="讀揀貨總表的排單表，把各門市的出庫量帶入成入貨（批號自動推定）">從揀貨總表帶入入貨</button></div>
+    <div class="notice"><span id="shopRule-${id}"></span> <button type="button" class="btn small need-setting" data-action="shop-rule">修改門市規則</button> <button type="button" class="btn small need-storeout" data-action="store-out" title="讀揀貨總表的排單表，把各門市的出庫量帶入成入貨（批號自動推定）">從揀貨總表帶入今天的入貨</button></div>
     <div id="shopKpi-${id}" class="grid-kpi"></div>
     <div class="panel form-area need-shop_${id}"><div class="panel-head"><div><h2>登錄${n}門市入貨／銷售／報廢</h2><p>入貨的批號可以不填：會照總公司當天的出貨扣批自動推定（先到期先出），之後看到貨上標籤不一樣再到「明細」更正。</p></div></div><div class="panel-body"><form id="shopForm-${id}" class="form-grid" novalidate>
       <div class="field"><label for="shDate-${id}">日期 *</label><input id="shDate-${id}" type="date" required></div>
@@ -859,7 +859,7 @@ function renderShops(today) {
   const rule = shopRule(), inRange = (e, m) => { const d = dayDiff(today, e.expiry); return m === 'soon' ? d >= 0 && d <= rule.warnDays : d < 0; };
   for (const s of SHOPS) {
     const id = s.id, L = shopLedger(id), mode = shopMode[id], plan = shopBatchPlan();
-    $('shopRule-' + id).innerHTML = `<strong>門市規則：</strong>有效日期＝配送到門市（入貨）那天＋<strong>${rule.shelfDays} 天</strong>，跟工廠的製作日期無關；剩 <strong>${rule.warnDays} 天</strong>以內算「快到期」。入貨會從<strong>揀貨總表</strong>的門市出庫自動帶入（同步入口網站時一起帶，或按「從揀貨總表帶入入貨」），批號照總公司當天的出貨扣批推定。銷售、報廢可以指定批號，沒指定就從最早到期的扣；已過期的不能銷售，只能報廢。`;
+    $('shopRule-' + id).innerHTML = `<strong>門市規則：</strong>有效日期＝配送到門市（入貨）那天＋<strong>${rule.shelfDays} 天</strong>，跟工廠的製作日期無關；剩 <strong>${rule.warnDays} 天</strong>以內算「快到期」。入貨會從<strong>揀貨總表</strong>帶入今天的門市出庫（同步入口網站時一起帶，或按「從揀貨總表帶入今天的入貨」），批號照總公司當天的出貨扣批推定。銷售、報廢可以指定批號，沒指定就從最早到期的扣；已過期的不能銷售，只能報廢。`;
     // 庫存：每個品號一列，每個「批號＋到期日」一個標籤（只算今天以前入貨的）
     const byP = new Map();
     for (const l of L.lots) {
@@ -945,13 +945,8 @@ async function deleteShopRec(sid, id) {
 const canStoreOut = sid => can('ship') || can(shopPerm(sid));
 const storeOutMeta = () => FEStore.get('settings', 'storeout') || {};
 let storeOutBusy = false, storeOutOldWarned = false;
-// 預設帶入的日期：同步起算日（最多往前 30 天）到今天；沒有起算日就最近 14 天
-function storeOutDates() {
-  const t = TODAY(), from = syncFromDate(), out = [];
-  let d = from && from > addDays(t, -31) ? from : addDays(t, -13);
-  while (d <= t && out.length < 31) { out.push(d); d = addDays(d, 1); }
-  return out;
-}
+// 只帶入今天的門市出庫（跟「商品總計」看到的一樣）；過去的日子不補，已經帶入的保留不動
+function storeOutDates() { const t = TODAY(), from = syncFromDate(); return !from || t >= from ? [t] : []; }
 async function syncStoreOut(dates, { quiet = false, delay = 0 } = {}) {
   if (storeOutBusy || !window.FEAuth || !FEAuth.user() || loading()) return;
   if (!SHOPS.some(x => canStoreOut(x.id))) { if (!quiet) toast('你沒有「出貨」或門市的權限，不能帶入門市入貨', true); return; }
@@ -974,7 +969,7 @@ async function syncStoreOut(dates, { quiet = false, delay = 0 } = {}) {
       const p = code ? byCode.get(code) : byName.get(name);
       if (p || !code || !CODE_RE.test(code)) return p || null;
       const nm = `${code} ${name}`.trim(), np = { id: productId(nm), name: nm, unit: '個', shelfDays: data.settings.defaultShelf, lowStock: 0 };
-      byCode.set(code, np); newProducts.push(np); return np;
+      byCode.set(code, np); if (name && !byName.has(name)) byName.set(name, np); newProducts.push(np); return np;
     };
     const existing = new Map(data.shops.filter(r => String(r.id).startsWith('pt-in-')).map(r => [r.id, r]));
     const saves = [], removes = [], who = myName(), at = nowIso(), cnt = Object.fromEntries(SHOPS.map(x => [x.id, 0])), qn = Object.fromEntries(SHOPS.map(x => [x.id, 0])), notFound = [], unknown = new Set();
@@ -1011,16 +1006,16 @@ async function syncStoreOut(dates, { quiet = false, delay = 0 } = {}) {
       FEStore.save('settings', { id: 'storeout', at: Date.now(), by: who, first: dates[0], last: dates[dates.length - 1], days: found.length, counts: cnt, qty: qn, notFound, changed, unknown: [...unknown].slice(0, 20) });
     });
     if (quiet && !changed) return;
-    const range = `${shortDate(dates[0])}～${shortDate(dates[dates.length - 1])}`;
+    const range = dates.length === 1 ? shortDate(dates[0]) : `${shortDate(dates[0])}～${shortDate(dates[dates.length - 1])}`;
     const parts = SHOPS.filter(x => canStoreOut(x.id)).map(x => `${x.name} ${cnt[x.id]} 項（${fmt(qn[x.id])} 個）`).join('、');
-    const notes = [notFound.length ? `${notFound.map(shortDate).join('、')} 沒有排單表，沒有帶入` : '', unknown.size ? `${unknown.size} 個品名對不到產品（${[...unknown].slice(0, 3).join('、')}${unknown.size > 3 ? '…' : ''}）` : '', newProducts.length ? `新增產品 ${newProducts.length} 項` : ''].filter(Boolean).join('；');
+    const notes = [notFound.length ? `${notFound.map(shortDate).join('、')} 還沒有排單表，沒有帶入` : '', unknown.size ? `${unknown.size} 個品名對不到產品（${[...unknown].slice(0, 3).join('、')}${unknown.size > 3 ? '…' : ''}）` : '', newProducts.length ? `新增產品 ${newProducts.length} 項` : ''].filter(Boolean).join('；');
     say(`門市入貨已從揀貨總表帶入（${range}）：${parts}${changed ? '' : '（數字都沒變）'}。批號照總公司當天的出貨扣批自動推定${notes ? '。' + notes : ''}`, false, 12000);
   } finally { storeOutBusy = false; }
 }
 function renderStoreOutInfo() {
   const el = $('storeOutInfo'); if (!el) return;
   const m = storeOutMeta();
-  el.textContent = m.at ? `上次帶入：${new Date(m.at).toLocaleString('zh-TW', { month: 'numeric', day: 'numeric', hour: '2-digit', minute: '2-digit' })}（${m.by || '—'}）${shortDate(m.first)}～${shortDate(m.last)}：${SHOPS.map(x => `${x.name} ${(m.counts || {})[x.id] || 0} 項`).join('、')}${(m.notFound || []).length ? `；${m.notFound.map(shortDate).join('、')} 沒有排單表` : ''}${(m.unknown || []).length ? `；對不到產品：${m.unknown.slice(0, 5).join('、')}` : ''}` : '還沒有帶入過。按右邊的按鈕，或用書籤同步入口網站時會自動帶入。';
+  el.textContent = m.at ? `上次帶入：${new Date(m.at).toLocaleString('zh-TW', { month: 'numeric', day: 'numeric', hour: '2-digit', minute: '2-digit' })}（${m.by || '—'}）${m.first === m.last ? shortDate(m.first) : `${shortDate(m.first)}～${shortDate(m.last)}`}：${SHOPS.map(x => `${x.name} ${(m.counts || {})[x.id] || 0} 項`).join('、')}${(m.notFound || []).length ? `；${m.notFound.map(shortDate).join('、')} 沒有排單表` : ''}${(m.unknown || []).length ? `；對不到產品：${m.unknown.slice(0, 5).join('、')}` : ''}` : '還沒有帶入過。按右邊的按鈕，或用書籤同步入口網站時會自動帶入今天的。';
 }
 async function editShopRule() {
   if (!can('setting')) return;
@@ -1309,8 +1304,8 @@ function applyPortalPending() {
     const notes = [modeB ? `${modeB === dates.length ? '全部' : `其中 ${modeB} 天`}用全現貨模式（${stockFromDate()} 起）` : '', stockOpen.set ? `期初現貨 ${stockOpen.n} 個品號（${fmt(stockOpen.q)} 個，${from}）` : '', !c.hasExtra ? '這是舊版書籤，' + (!c.hasStock ? '沒有帶入現貨' : !c.hasConvert ? '沒有帶入半成品轉現貨' : !c.hasAdjust ? '沒有帶入半成品／現貨增減' : '沒有帶入總表的手動數字與隔夜差異') + '，請到「入口網站同步」重新拖曳書籤' : '', dates.some(d => c.noGap.has(d)) ? `${dates.filter(d => c.noGap.has(d)).map(shortDate).join('、')} 沒讀到前一天的總表，隔夜差異沒有更新` : '', newProducts.length ? `新增產品 ${newProducts.length} 項` : '', skippedCodes.size ? `略過 ${prefixes.join('、')} 以外的品號 ${skippedCodes.size} 個` : '', excludedCodes.size ? `略過${EXCLUDE_WORDS.join('、')} ${excludedCodes.size} 個品號` : '', before.length ? `起算日 ${from} 以前的 ${before.length} 天沒有匯入` : '', !okP ? '你沒有生產權限，生產數字沒有存' : '', !okS ? '你沒有出貨權限，出貨數字沒有存' : '', c.warn ? '注意：' + c.warn : ''].filter(Boolean).join('；');
     toast(`已同步入口網站 ${range}：${parts}${changed ? '' : '（數字都沒變）'}${notes ? '。' + notes : ''}`, false, 10000);
     go('portal');
-    // 接著帶入同一段日期的門市出庫（揀貨總表），結果在入口網站的提示之後顯示
-    if (dates.length) setTimeout(() => syncStoreOut(dates, { quiet: true, delay: 7000 }), 50);
+    // 接著帶入今天的門市出庫（揀貨總表），結果在入口網站的提示之後顯示
+    if (dates.length) setTimeout(() => syncStoreOut(storeOutDates(), { quiet: true, delay: 7000 }), 50);
   } catch (e) { toast('入口網站資料讀取失敗：' + e.message, true, 8000); }
   finally { portalApplying = false; }
 }
