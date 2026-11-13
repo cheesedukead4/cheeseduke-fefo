@@ -105,7 +105,7 @@
   </section>
 
   <section id="adjust" class="section">
-    <p class="section-intro">總公司半成品、現貨的增加與減少。<strong>入口網站同步會自動帶入</strong>總表的「半成品增減」「半成品轉試吃」「現貨增減」（標「入口網站」，不能在這裡刪）；總表沒有的再手動登錄。<strong>換盒</strong>（例如 CK-01 的半成品換成 CK-01|YB-86 的盒子變現貨）：同一天同品號開頭的半成品減少，會變成另一個品號的現貨增加，沿用原本的製作日期與有效日期，批號用當天。手動的<strong>增加</strong>：半成品＝當天一開始加入、現貨＝出貨前加入；手動的<strong>減少</strong>＝當天結束時扣，可以指定哪一批，沒指定就從效期最早的扣，已過期的也能扣。</p>
+    <p class="section-intro">總公司半成品、現貨的增加與減少。<strong>入口網站同步會自動帶入</strong>總表的「半成品增減」「半成品轉試吃」「現貨增減」（標「入口網站」，不能在這裡刪）；總表沒有的再手動登錄。<strong>換盒</strong>（例如 CK-01 的半成品換成 CK-01|YB-86 的盒子變現貨）：同一天同品號開頭的半成品減少，會變成另一個品號的現貨增加，跟轉現貨一樣<strong>換盒那天算第一天</strong>（製作日期、批號用當天，有效日期＝當天＋保存天數）。手動的<strong>增加</strong>：半成品＝當天一開始加入、現貨＝出貨前加入；手動的<strong>減少</strong>＝當天結束時扣，可以指定哪一批，沒指定就從效期最早的扣，已過期的也能扣。</p>
     <div class="panel form-area need-produce"><div class="panel-head"><div><h2>手動登錄增減</h2><p>入口網站沒有的增減才需要在這裡登錄；存檔前下方會先預覽結果</p></div></div><div class="panel-body"><form id="adjustForm" class="form-grid" novalidate>
       <div class="field"><label for="adDate">日期 *</label><input id="adDate" type="date" required></div>
       <div class="field"><label for="adPool">類別 *</label><select id="adPool"><option value="semi">半成品</option><option value="stock">現貨</option></select></div>
@@ -142,7 +142,7 @@
   </section>
 
   <section id="batchrule" class="section">
-    <p class="section-intro">批號 8 碼：第 1、2、7、8 碼＝<strong>品號碼</strong>，第 3 碼＝<strong>月碼</strong>，第 4 碼＝<strong>年碼</strong>，第 5、6 碼＝<strong>日期碼</strong>。例如 CK-08 在 2026-11-11 生產 → <span class="mono">CKAS1B08</span>。有效日期＝製作日期＋保存天數。<strong>還沒轉現貨的半成品不給批號</strong>，只看製作日期與有效日期；生產轉現貨會依生產日期帶入批號，半成品轉成現貨時，批號用轉現貨當天的日期（有效日期還是照那批半成品）。</p>
+    <p class="section-intro">批號 8 碼：第 1、2、7、8 碼＝<strong>品號碼</strong>，第 3 碼＝<strong>月碼</strong>，第 4 碼＝<strong>年碼</strong>，第 5、6 碼＝<strong>日期碼</strong>。例如 CK-08 在 2026-11-11 生產 → <span class="mono">CKAS1B08</span>。有效日期＝製作日期＋保存天數。<strong>還沒轉現貨的半成品不給批號</strong>，只看製作日期與有效日期；生產轉現貨會依生產日期帶入批號，半成品轉成現貨時，<strong>轉現貨那天算第一天</strong>：批號、製作日期用轉現貨當天，有效日期＝轉現貨日＋保存天數。</p>
     <div class="panel-split">
       <div class="panel"><div class="panel-head"><div><h2>查批號</h2><p>選產品和生產日期，馬上產生批號與有效日期</p></div></div><div class="panel-body"><div class="form-grid br-form">
         <div class="field span2"><label for="brProduct">產品</label><input id="brProduct" list="productNames" placeholder="輸入品號或品名，從清單選擇" maxlength="80" autocomplete="off"></div>

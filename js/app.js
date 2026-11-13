@@ -194,6 +194,8 @@ function exportState() {
 //            手動的半成品減少、現貨減少＝當天結束（出貨之後）；隔夜差異（phase 'open'）＝當天最一開始（比當天入庫還早）
 const adjPriority = x => x.phase === 'open' ? -1 : x.dir === 'add' ? (x.pool === 'stock' ? 1.5 : 0) : (x.pool !== 'stock' && x.phase === 'pack' ? 0.9 : 3);
 const baseCode = name => productCodeOf(name).split('|')[0];
+// 產品的保存天數（轉現貨的有效日期＝轉現貨日＋保存天數）
+const shelfIn = (name, st = data) => { const p = st.products.find(x => x.name === name); const n = p ? Number(p.shelfDays) : NaN; return Number.isFinite(n) && n >= 0 ? n : (st.settings && Number(st.settings.defaultShelf)) || 30; };
 function calculateLedger(asOf = '9999-12-31', st = data) {
   const events = [], prio = { production: 0, convert: 1, shipment: 2 };
   for (const x of st.opening) if (x.entryDate <= asOf) events.push({ date: x.entryDate, priority: 0, seq: x.seq || 0, type: 'opening', item: x });
@@ -214,10 +216,10 @@ function calculateLedger(asOf = '9999-12-31', st = data) {
       const isStock = x.pool === 'stock', lotBase = { source: 'adjust', product: x.product, entryDate: e.date, used: 0, shipped: 0, converted: 0, adjusted: 0, seq: x.seq || 0, unit: getUnit(x.product, st) };
       if (x.dir === 'add' && !isStock) { addLot({ ...lotBase, id: x.id, pool: 'semi', batch: '—', manufactureDate: x.manufactureDate, expiryDate: x.expiryDate, quantity: Number(x.quantity), remaining: Number(x.quantity) }); continue; }
       if (x.dir === 'add') {
-        // 現貨增加：同一天、同一個品號開頭（例如 CK-01 與 CK-01|YB-86 換盒）在包裝區減掉的半成品，照順序變成這裡的現貨（沿用那批的製作日期與有效日期）；
-        //           沒有對應的就當天製作、有效日期＝當天＋保存天數。批號用當天（轉現貨當天）
+        // 現貨增加：同一天、同一個品號開頭（例如 CK-01 與 CK-01|YB-86 換盒）在包裝區減掉的半成品，照順序變成這裡的現貨（記下來源）；
+        //           換盒跟轉現貨一樣，當天算第一天：製作日期與有效日期用這筆紀錄的（入口網站帶入的＝當天、當天＋保存天數）。批號用當天
         const pool = packPool.get(baseCode(x.product) + '|' + e.date) || [], parts = []; let need = Number(x.quantity), k = 0;
-        for (const p of pool) { if (need <= 1e-7) break; if (p.left <= 1e-7) continue; const q = clampQty(Math.min(need, p.left)); p.left = clampQty(p.left - q); need = clampQty(need - q); addLot({ ...lotBase, id: `${x.id}#${k++}`, pool: 'stock', batch: makeBatch(x.product, e.date) || '—', manufactureDate: p.manufactureDate, expiryDate: p.expiryDate, quantity: q, remaining: q }); parts.push({ manufactureDate: p.manufactureDate, expiryDate: p.expiryDate, quantity: q, from: p.product }); }
+        for (const p of pool) { if (need <= 1e-7) break; if (p.left <= 1e-7) continue; const q = clampQty(Math.min(need, p.left)); p.left = clampQty(p.left - q); need = clampQty(need - q); addLot({ ...lotBase, id: `${x.id}#${k++}`, pool: 'stock', batch: makeBatch(x.product, e.date) || '—', manufactureDate: x.manufactureDate, expiryDate: x.expiryDate, quantity: q, remaining: q, fromMfg: p.manufactureDate, fromExp: p.expiryDate }); parts.push({ manufactureDate: x.manufactureDate, expiryDate: x.expiryDate, quantity: q, from: p.product, fromMfg: p.manufactureDate }); }
         if (need > 1e-7) { addLot({ ...lotBase, id: `${x.id}#${k++}`, pool: 'stock', batch: makeBatch(x.product, e.date) || '—', manufactureDate: x.manufactureDate, expiryDate: x.expiryDate, quantity: need, remaining: need }); parts.push({ manufactureDate: x.manufactureDate, expiryDate: x.expiryDate, quantity: need }); }
         adjusts.set(x.id, { required: Number(x.quantity), done: Number(x.quantity), shortage: 0, parts });
         continue;
@@ -232,15 +234,15 @@ function calculateLedger(asOf = '9999-12-31', st = data) {
     }
     const usable = l => l.remaining > 1e-7 && l.expiryDate >= e.date && l.manufactureDate <= e.date && l.entryDate <= e.date;
     if (e.type === 'convert') {
-      // 半成品轉現貨：從效期最早的半成品轉（之前的先，當天入庫的最後），轉過去的現貨保留原本的批號與有效日期
+      // 半成品轉現貨：從效期最早的半成品轉（之前的先，當天入庫的最後）；轉現貨那天算第一天（製作日期＝轉現貨日，有效日期＝轉現貨日＋保存天數）
       const from = (byProduct.get(x.product) || []).filter(l => l.pool === 'semi' && usable(l)).sort((a, b) => (prior(a, e.date) ? 0 : 1) - (prior(b, e.date) ? 0 : 1) || tie(a, b));
       const required = Number(x.quantity); let need = required;
       for (const lot of from) {
         if (need <= 1e-7) break;
         const q = clampQty(Math.min(need, lot.remaining));
         lot.remaining = clampQty(lot.remaining - q); lot.used = clampQty(lot.used + q); lot.converted = clampQty(lot.converted + q); need = clampQty(need - q);
-        // 半成品轉現貨：批號用轉現貨當天，有效日期沿用那批半成品
-        addLot({ id: x.id + '#' + lot.id, source: 'convert', pool: 'stock', product: lot.product, batch: makeBatch(lot.product, e.date) || '—', manufactureDate: lot.manufactureDate, expiryDate: lot.expiryDate, entryDate: e.date, quantity: q, used: 0, shipped: 0, converted: 0, remaining: q, seq: x.seq || 0, unit: lot.unit, fromLot: lot.id });
+        // 半成品轉現貨：轉現貨那天算第一天，批號、製作日期都用轉現貨當天，有效日期＝轉現貨日＋保存天數（記下原本半成品的製作／有效日期）
+        addLot({ id: x.id + '#' + lot.id, source: 'convert', pool: 'stock', product: lot.product, batch: makeBatch(lot.product, e.date) || '—', manufactureDate: e.date, expiryDate: addDays(e.date, shelfIn(lot.product, st)), fromMfg: lot.manufactureDate, fromExp: lot.expiryDate, entryDate: e.date, quantity: q, used: 0, shipped: 0, converted: 0, remaining: q, seq: x.seq || 0, unit: lot.unit, fromLot: lot.id });
       }
       converts.set(x.id, { required, moved: clampQty(required - need), shortage: clampQty(need) });
       continue;
@@ -260,7 +262,7 @@ function calculateLedger(asOf = '9999-12-31', st = data) {
   return { lots, shipments, converts, adjusts };
 }
 // 依「產品＋現貨／半成品＋批號＋製作日＋有效日」彙整；inQty＝入庫（期初＋生產＋轉入現貨），shipped＝出貨，converted＝轉成現貨
-function groupLots(ledger) { const g = new Map(); for (const lot of ledger.lots) { const key = JSON.stringify([lot.product, lot.pool, lot.batch, lot.manufactureDate, lot.expiryDate]); if (!g.has(key)) g.set(key, { product: lot.product, pool: lot.pool, batch: lot.batch, manufactureDate: lot.manufactureDate, expiryDate: lot.expiryDate, opening: 0, production: 0, convert: 0, adjust: 0, inQty: 0, used: 0, shipped: 0, converted: 0, adjusted: 0, remaining: 0, unit: lot.unit }); const r = g.get(key); r[lot.source] = clampQty((r[lot.source] || 0) + lot.quantity); r.inQty = clampQty(r.inQty + lot.quantity); r.used = clampQty(r.used + lot.used); r.shipped = clampQty(r.shipped + lot.shipped); r.converted = clampQty(r.converted + lot.converted); r.adjusted = clampQty(r.adjusted + (lot.adjusted || 0)); r.remaining = clampQty(r.remaining + lot.remaining); } return [...g.values()].sort((a, b) => productOrder(a.product, b.product) || cmp(a.expiryDate, b.expiryDate) || cmp(a.pool, b.pool) || cmp(a.manufactureDate, b.manufactureDate)); }
+function groupLots(ledger) { const g = new Map(); for (const lot of ledger.lots) { const key = JSON.stringify([lot.product, lot.pool, lot.batch, lot.manufactureDate, lot.expiryDate]); if (!g.has(key)) g.set(key, { product: lot.product, pool: lot.pool, batch: lot.batch, manufactureDate: lot.manufactureDate, expiryDate: lot.expiryDate, opening: 0, production: 0, convert: 0, adjust: 0, inQty: 0, used: 0, shipped: 0, converted: 0, adjusted: 0, remaining: 0, unit: lot.unit, fromMfgs: new Set() }); const r = g.get(key); if (lot.fromMfg) r.fromMfgs.add(lot.fromMfg); r[lot.source] = clampQty((r[lot.source] || 0) + lot.quantity); r.inQty = clampQty(r.inQty + lot.quantity); r.used = clampQty(r.used + lot.used); r.shipped = clampQty(r.shipped + lot.shipped); r.converted = clampQty(r.converted + lot.converted); r.adjusted = clampQty(r.adjusted + (lot.adjusted || 0)); r.remaining = clampQty(r.remaining + lot.remaining); } return [...g.values()].sort((a, b) => productOrder(a.product, b.product) || cmp(a.expiryDate, b.expiryDate) || cmp(a.pool, b.pool) || cmp(a.manufactureDate, b.manufactureDate)); }
 // 全 App 共用的品號排序：品號開頭 CK（6吋）→ CC（4吋）→ CA（小小公爵）→ CS（方盒）→ CL（生巧），其他開頭（例如 KA）排在後面，同開頭內照品號
 const SORT_PREFIXES = ['CK', 'CC', 'CA', 'CS', 'CL'];
 function prefixRank(name) { const px = String(name).split(/[-| ]/)[0].toUpperCase(), i = SORT_PREFIXES.indexOf(px); return i >= 0 ? i : SORT_PREFIXES.length; }
@@ -616,7 +618,7 @@ function csvData(kind) {
   if (kind === 'opening') return ['期初庫存', ['入帳日期', '產品', '單位', '批號', '製作日期', '有效日期', '原始庫存', '備註', '登錄人'], [...data.opening].sort((a, b) => cmp(b.entryDate, a.entryDate) || productOrder(a.product, b.product)).map(x => [x.entryDate, x.product, getUnit(x.product), x.batch, x.manufactureDate, expShow(x.expiryDate), x.quantity, x.note || '', x.by || ''])];
   if (kind === 'production') return ['每日生產', ['生產入庫日期', '產品', '單位', '批號', '製作日期', '有效日期', '生產量', '備註', '登錄人'], data.movements.filter(x => x.type === 'production').sort((a, b) => cmp(b.date, a.date) || productOrder(a.product, b.product)).map(x => [x.date, x.product, getUnit(x.product), x.batch, x.manufactureDate, expShow(x.expiryDate), x.quantity, x.note || '', x.by || ''])];
   if (kind === 'shipment') return ['每日出貨', ['出貨日期', '產品', '單位', '出貨單號', '需求量', '實際出貨', '出貨缺口', '備註', '登錄人'], data.movements.filter(x => x.type === 'shipment').sort((a, b) => cmp(b.date, a.date) || productOrder(a.product, b.product)).map(x => { const s = led.shipments.get(x.id); return [x.date, x.product, getUnit(x.product), x.orderNo || '', x.quantity, s?.shipped || 0, s?.shortage || 0, x.note || '', x.by || '']; })];
-  if (kind === 'batches') return ['批次庫存', ['產品', '單位', '類別', '批號', '製作日期', '有效日期', '期初庫存', '新增生產', '半成品轉入', '半成品增加', '已出貨', '轉成現貨', '半成品減少', '剩餘量', '狀態'], groups.map(x => [x.product, x.unit, poolLabel(x.pool), x.batch, x.manufactureDate, expShow(x.expiryDate), x.opening, x.production, x.convert, x.adjust, x.shipped, x.converted, x.adjusted, x.remaining, expiryStatus(x.expiryDate, x.remaining).label])];
+  if (kind === 'batches') return ['批次庫存', ['產品', '單位', '類別', '批號', '製作日期', '有效日期', '原半成品製作日期', '期初庫存', '新增生產', '半成品轉入', '半成品增加', '已出貨', '轉成現貨', '半成品減少', '剩餘量', '狀態'], groups.map(x => [x.product, x.unit, poolLabel(x.pool), x.batch, x.manufactureDate, expShow(x.expiryDate), [...(x.fromMfgs || [])].sort().join('、'), x.opening, x.production, x.convert, x.adjust, x.shipped, x.converted, x.adjusted, x.remaining, expiryStatus(x.expiryDate, x.remaining).label])];
   if (kind === 'allocation') return ['出貨扣批明細', ['出貨日期', '出貨單號', '產品', '單位', '批號', '製作日期', '有效日期', '扣貨量', '類別'], allocationRows(led).map(x => [x.date, x.orderNo, x.product, x.unit, x.batch, x.manufactureDate, expShow(x.expiryDate), x.quantity, x.kind === 'shortage' ? '缺口' : '已分配'])];
   if (kind === 'adjust') return ['半成品現貨增減', ['日期', '產品', '單位', '類別', '增加／減少', '數量', '製作日期', '有效日期', '指定扣除的批', '實際扣除／來源', '缺口', '原因／備註', '登錄人'], data.movements.filter(r => r.type === 'adjust').sort((a, b) => cmp(b.date, a.date) || productOrder(a.product, b.product)).map(r => { const o = led.adjusts.get(r.id); return [r.date, r.product, getUnit(r.product), poolName(r.pool), r.dir === 'add' ? '增加' : '減少', r.quantity, r.manufactureDate || '', r.expiryDate || '', r.fromMfg ? `製 ${r.fromMfg}／效期 ${r.fromExp}` : '', o ? adjPartsText(o.parts) : '', o ? o.shortage : '', r.note, r.by]; })];
   if (kind === 'shop') { const outs = new Map(); for (const x of SHOPS) for (const [k, v] of shopLedger(x.id).outs) outs.set(k, v); return ['門市紀錄', ['門市', '日期', '類別', '產品', '單位', '批號', '數量', '門市到期日', '扣除的批號', '缺口', '備註', '登錄人'], [...data.shops].sort((a, b) => SHOPS.findIndex(x => x.id === a.shop) - SHOPS.findIndex(x => x.id === b.shop) || cmp(b.date, a.date) || productOrder(a.product, b.product)).map(r => { const o = outs.get(r.id); return [shopName(r.shop), r.date, SHOP_TYPES[r.type], r.product, getUnit(r.product), r.type === 'in' ? shopInText(r) : r.batch, r.quantity, r.expiryDate || '', o ? shopPartsText(o.parts) : '', o ? o.short : '', r.note, r.by]; })]; }
@@ -637,7 +639,7 @@ async function exportXlsx() {
    手動登錄或入口網站帶入（總表「半成品增減」「半成品轉試吃」「現貨增減」）。
    增加：半成品＝當天一開始加入一批（製作日期、有效日期）；現貨＝轉現貨之後、出貨前加入（批號用當天）。
    減少：手動的＝當天結束時扣（出貨、轉現貨之後）；入口網站的半成品減少＝跟轉現貨同時（出貨前）。可指定哪一批，沒指定就從效期最早的扣（已過期的也能扣）；不夠扣的列為缺口。
-   換盒：同一天、同一個品號開頭（CK-01 → CK-01|YB-86）入口網站的半成品減少，會變成現貨增加的來源，沿用原本的製作日期與有效日期。 */
+   換盒：同一天、同一個品號開頭（CK-01 → CK-01|YB-86）入口網站的半成品減少，會變成現貨增加的來源；跟轉現貨一樣，換盒當天算第一天。 */
 const poolName = pool => pool === 'stock' ? '現貨' : '半成品';
 // 某個產品在某天結束時還有的批（給「減少」選）
 function lotsLeftOf(product, date, pool) {
@@ -645,7 +647,7 @@ function lotsLeftOf(product, date, pool) {
   for (const l of L.lots) if (l.product === product && l.pool === pool && l.remaining > 1e-7) { const k = l.manufactureDate + '|' + l.expiryDate, x = m.get(k) || { mfg: l.manufactureDate, exp: l.expiryDate, left: 0, batches: new Set() }; x.left = clampQty(x.left + l.remaining); if (l.batch && l.batch !== '—') x.batches.add(l.batch); m.set(k, x); }
   return [...m.values()].sort((a, b) => cmp(a.exp, b.exp) || cmp(a.mfg, b.mfg));
 }
-const adjPartsText = parts => parts.map(p => `${p.from ? `沿用 ${productCodeOf(p.from)} ` : ''}${p.expiryDate === NO_EXPIRY ? '期初現貨' : `製 ${md(p.manufactureDate)}（效期 ${md(p.expiryDate)}）`}×${fmt(p.quantity)}`).join('、');
+const adjPartsText = parts => parts.map(p => `${p.from ? `由 ${productCodeOf(p.from)} 換盒（原製 ${md(p.fromMfg)}）・` : ''}${p.expiryDate === NO_EXPIRY ? '期初現貨' : `製 ${md(p.manufactureDate)}（效期 ${md(p.expiryDate)}）`}×${fmt(p.quantity)}`).join('、');
 function adjFormSync(fillExpiry) {
   const dir = $('adDir').value, pool = $('adPool').value, date = $('adDate').value, p = getProduct($('adProduct').value), box = $('adPreview');
   $('adMfgWrap').hidden = $('adExpWrap').hidden = dir !== 'add'; $('adFromWrap').hidden = dir !== 'sub';
@@ -1330,7 +1332,7 @@ function portalBookmarklet() {
     "ov.textContent='讀取完成，正在開啟庫存效期 App…';location.href='" + app + "#portal='+s}catch(e){ov.remove();alert('讀取入口網站失敗：'+e.message+'\\n\\n請確認已經登入入口網站，並在入口網站的頁面（例如物管駕駛艙總表）按這個書籤')}})()";
   return 'javascript:' + encodeURIComponent(code);
 }
-const FLOW_SEMI = '<strong>半成品模式</strong>：<strong>半成品入庫</strong>登錄成有效期的半成品批次；<strong>半成品轉現貨</strong>照總表的實際數量，從效期最早的半成品轉成現貨（保留原本的批號與有效日期，轉多了沒出完的留到隔天）；<strong>生產轉現貨</strong>是當天生產直接做成的現貨；<strong>半成品增減、半成品轉試吃、現貨增減、總表的手動數字</strong>記到「半成品／現貨增減」頁；總表當天期初跟前一天期末對不上的<strong>隔夜差異</strong>也記到那頁，算在當天一開始（換盒的情況：同一天同品號開頭的半成品減少會變成另一個品號的現貨增加，沿用原本的效期）；起算日的<strong>期初現貨</strong>沒有效期資料。<strong>實際揀貨</strong>登錄成出貨：<strong>①現貨（含當天轉好的）→ ②現貨不夠再直接扣半成品（效期最早的先）→ ③當天的生產轉現貨</strong>，當天的半成品入庫是出完貨剩下的。';
+const FLOW_SEMI = '<strong>半成品模式</strong>：<strong>半成品入庫</strong>登錄成有效期的半成品批次；<strong>半成品轉現貨</strong>照總表的實際數量，從效期最早的半成品轉成現貨（<strong>轉現貨那天算第一天</strong>：製作日期與批號用轉現貨日，有效日期＝轉現貨日＋保存天數；轉多了沒出完的留到隔天）；<strong>生產轉現貨</strong>是當天生產直接做成的現貨；<strong>半成品增減、半成品轉試吃、現貨增減、總表的手動數字</strong>記到「半成品／現貨增減」頁；總表當天期初跟前一天期末對不上的<strong>隔夜差異</strong>也記到那頁，算在當天一開始（換盒的情況：同一天同品號開頭的半成品減少會變成另一個品號的現貨增加，也是換盒那天算第一天）；起算日的<strong>期初現貨</strong>沒有效期資料。<strong>實際揀貨</strong>登錄成出貨：<strong>①現貨（含當天轉好的）→ ②現貨不夠再直接扣半成品（效期最早的先）→ ③當天的生產轉現貨</strong>，當天的半成品入庫是出完貨剩下的。';
 const FLOW_STOCK = '<strong>全現貨模式</strong>：沒有半成品，<strong>當天生產</strong>（總表的半成品入庫＋生產轉現貨）登錄成有效期的現貨批次；<strong>實際揀貨</strong>登錄成出貨：<strong>①既有現貨（效期最早的先）→ ②不夠再從當天生產直接取</strong>，剩下的就是現貨入庫。';
 // 隔夜差異：半成品／現貨各自的 ±（沒有就 —）
 const gapText = g => { const f = (v, l) => v ? `${l}${v > 0 ? '＋' : '－'}${fmt(Math.abs(clampQty(v)))}` : ''; return [f(clampQty(g.gSemi), '半'), f(clampQty(g.gStock), '現')].filter(Boolean).join(' ') || '—'; };
