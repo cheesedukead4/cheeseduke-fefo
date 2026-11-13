@@ -194,6 +194,8 @@ html.auth-locked .app{display:none}
 .table-scroll.has-hbar::-webkit-scrollbar{display:none}
 .hbar{position:sticky;bottom:0;z-index:5;overflow-x:auto;overflow-y:hidden;background:var(--surface);border-top:1px solid var(--line-2);box-shadow:0 -4px 10px rgba(0,0,0,.06)}
 .hbar[hidden]{display:none}
+/* 門市入貨的推定批號 */
+.guess{display:inline-block;margin-left:4px;padding:0 4px;border:1px dashed currentColor;border-radius:4px;font-size:10px;line-height:1.5;opacity:.85}
 .hbar>div{height:1px}
 .hbar::-webkit-scrollbar{height:14px}
 .hbar::-webkit-scrollbar-track{background:var(--surface-2)}

@@ -1,6 +1,6 @@
 /* 離線快取：網站檔案先走網路，4 秒沒回應或失敗才用快取。雲端資料請求不經過快取。
    修改網站檔案後，把 CACHE 的版本號加 1；新增檔案時也要加進 ASSETS。 */
-var CACHE = 'fe-app-v25';
+var CACHE = 'fe-app-v26';
 var NET_TIMEOUT_MS = 4000;
 var ASSETS = [
   './', './index.html', './config.js', './manifest.webmanifest',
