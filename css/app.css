@@ -175,6 +175,8 @@ html.auth-locked .app{display:none}
 .form-grid{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:15px}
 .field{display:flex;flex-direction:column;gap:7px;min-width:0}
 .field label{font-size:12px;font-weight:700;color:var(--ink-2)}
+.field textarea{border:1px solid var(--line);border-radius:8px;padding:9px 11px;color:var(--ink);outline:0;background:var(--surface);width:100%;font:inherit;font-size:13px;line-height:1.6;resize:vertical;font-family:ui-monospace,Consolas,monospace}
+.field textarea:focus{border-color:var(--accent)}
 .field input,.field select{border:1px solid var(--line);border-radius:8px;min-height:41px;padding:9px 11px;color:var(--ink);outline:0;background:var(--surface);width:100%;transition:border .2s,box-shadow .2s}
 .field input:focus,.field select:focus{border-color:var(--accent);box-shadow:0 0 0 3px var(--focus)}
 .field input[readonly]{background:var(--surface-2);color:var(--muted)}

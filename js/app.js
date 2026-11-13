@@ -787,7 +787,7 @@ function shopLedger(shop, list = data.shops) {
   }
   return { lots, outs };
 }
-const shopPartsText = parts => parts.map(p => `${p.batch || '批號不明'}（到期 ${md(p.expiry)}）×${fmt(p.q)}`).join('、');
+const shopPartsText = parts => parts.map(p => `${p.batch || '批號不明'}（可販售到 ${md(p.expiry)}）×${fmt(p.q)}`).join('、');
 /* ---------- 門市入貨的推定批號 ----------
    入貨沒填批號時：從總公司「轉出日」（預設＝入貨日）這個品號的實際揀貨扣到的批號裡，照效期最早的先分給門市
    （出貨扣批本來就是先到期先出，所以門市拿到的就是那天出去的批）。同一天好幾間門市照 A11 → 京站 → 東橋 的順序分。
@@ -851,7 +851,7 @@ function shopSectionHtml(s) {
   return `<section id="shop-${id}" class="section">
     <div class="notice"><span id="shopRule-${id}"></span> <button type="button" class="btn small need-setting" data-action="shop-rule">修改可販售期</button> <button type="button" class="btn small need-storeout" data-action="store-out" title="讀揀貨總表的排單表，把各門市的出庫量帶入成入貨（批號自動推定）">從揀貨總表帶入今天的入貨</button></div>
     <div id="shopKpi-${id}" class="grid-kpi"></div>
-    <div class="panel form-area need-shop_${id}"><div class="panel-head"><div><h2>登錄${n}門市入貨／銷售／報廢</h2><p>入貨的批號可以不填：會照總公司當天的出貨扣批自動推定（先到期先出），之後看到貨上標籤不一樣再到「明細」更正。</p></div></div><div class="panel-body"><form id="shopForm-${id}" class="form-grid" novalidate>
+    <div class="panel form-area need-shop_${id}"><div class="panel-head"><div><h2>登錄${n}門市入貨／銷售／報廢</h2><p>銷售、報廢可以按右邊「批次匯入」從 Excel／POS 報表一次貼上；入貨會從揀貨總表帶入，批號可以不填（照總公司當天的出貨扣批自動推定）。</p></div><div class="toolbar"><button type="button" class="btn small primary" data-action="shop-import" data-shop="${id}">批次匯入銷售／報廢</button></div></div><div class="panel-body"><form id="shopForm-${id}" class="form-grid" novalidate>
       <div class="field"><label for="shDate-${id}">日期 *</label><input id="shDate-${id}" type="date" required></div>
       <div class="field"><label for="shType-${id}">類別 *</label><select id="shType-${id}"><option value="in">入貨（配送到門市）</option><option value="sale">銷售</option><option value="waste">報廢</option></select></div>
       <div class="field span2"><label for="shProduct-${id}">產品 *</label><input id="shProduct-${id}" list="productNames" required placeholder="輸入品號或品名，從清單選擇" maxlength="80" autocomplete="off"></div>
@@ -1037,6 +1037,75 @@ function renderStoreOutInfo() {
   const el = $('storeOutInfo'); if (!el) return;
   const m = storeOutMeta();
   el.textContent = m.at ? `上次帶入：${new Date(m.at).toLocaleString('zh-TW', { month: 'numeric', day: 'numeric', hour: '2-digit', minute: '2-digit' })}（${m.by || '—'}）${m.first === m.last ? shortDate(m.first) : `${shortDate(m.first)}～${shortDate(m.last)}`}：${SHOPS.map(x => `${x.name} ${(m.counts || {})[x.id] || 0} 項`).join('、')}${(m.notFound || []).length ? `；${m.notFound.map(shortDate).join('、')} 沒有排單表` : ''}${(m.unknown || []).length ? `；對不到產品：${m.unknown.slice(0, 5).join('、')}` : ''}` : '還沒有帶入過。按右邊的按鈕，或用書籤同步入口網站時會自動帶入今天的。';
+}
+/* ---------- 門市批次匯入（銷售／報廢） ----------
+   從 Excel、POS 報表複製貼上：每一行一個品項，自動找「品號或品名」和「數量」（數量取那一行最後一個數字；標題列、合計列沒有對到產品的會略過）。
+   同一個品號貼好幾行會加總。存成那天的銷售（或報廢）紀錄，id imp-類別-門市-日期-品號：同一天、同一類別再匯入一次會取代上次匯入的數字
+   （上次有、這次沒有的品項會移除），手動登錄的紀錄不受影響。批號不用填，照先到期先扣。之後有匯入連結時，帶入也用同一套規則。 */
+function matchProductCell(cell) {
+  const v = clean(cell); if (!v) return null;
+  const up = v.toUpperCase(), list = data.products.filter(p => !p.virtual);
+  return list.find(p => p.name === v)
+    || list.find(p => productCodeOf(p.name).toUpperCase() === up)
+    || list.find(p => clean(p.name.slice(productCodeOf(p.name).length)) === v)
+    || list.find(p => up.startsWith(productCodeOf(p.name).toUpperCase() + ' ')) || null;
+}
+function parseShopPaste(text) {
+  const items = new Map(), skipped = [];
+  for (const line of String(text || '').split(/\r?\n/)) {
+    if (!line.trim()) continue;
+    const cells = line.split(/\t|,(?=(?:[^"]*"[^"]*")*[^"]*$)/).map(c => clean(c.replace(/^"|"$/g, '')));
+    let p = null, pi = -1;
+    for (let i = 0; i < cells.length && !p; i++) { p = matchProductCell(cells[i]); if (p) pi = i; }
+    let q = NaN;
+    for (let i = cells.length - 1; i >= 0; i--) { if (i === pi) continue; const n = Number(cells[i].replace(/[,，\s]/g, '')); if (cells[i] !== '' && Number.isFinite(n)) { q = n; break; } }
+    if (!p || !(q > 0) || q >= 1e7) { if (cells.some(Boolean)) skipped.push(line.trim().slice(0, 40)); continue; }
+    if (isExcluded(p.name)) { skipped.push(line.trim().slice(0, 40)); continue; }
+    items.set(p.name, clampQty((items.get(p.name) || 0) + q));
+  }
+  return { items: [...items.entries()].map(([product, quantity]) => ({ product, quantity })).sort((a, b) => productOrder(a.product, b.product)), skipped };
+}
+const shopImportId = (sid, type, date, product) => `imp-${type}-${sid}-${date}-${productCodeOf(product)}`;
+function shopImportRecords(sid, type, date, items) {
+  const who = myName(), at = nowIso(), old = new Map(data.shops.filter(r => r.shop === sid && r.type === type && r.date === date && String(r.id).startsWith(`imp-${type}-${sid}-${date}-`)).map(r => [r.id, r]));
+  const recs = items.map(x => { const id = shopImportId(sid, type, date, x.product), o = old.get(id); return o ? { ...o, product: x.product, quantity: x.quantity, ...stampEdit() } : { id, shop: sid, type, date, product: x.product, quantity: x.quantity, batch: '', note: '批次匯入', seq: nextSeq(), by: who, at }; });
+  const keep = new Set(recs.map(r => r.id));
+  return { recs, removes: [...old.keys()].filter(id => !keep.has(id)), replaced: old.size };
+}
+async function openShopImport(sid) {
+  if (!can(shopPerm(sid))) return;
+  const name = shopName(sid);
+  const pr = modal({ title: `${name}門市：批次匯入銷售／報廢`, ok: '匯入', wide: true,
+    html: `<p class="modal-note">從 Excel 或 POS 報表<strong>直接複製貼上</strong>：每一行一個品項，要有<strong>品號或品名</strong>和<strong>數量</strong>（其他欄位沒關係，數量取那一行最後一個數字；標題列、合計列會自動略過）。同一天、同一類別再匯入一次，會<strong>取代</strong>上次匯入的數字；手動登錄的不受影響。批號不用填，照先到期先扣。</p>
+      <div class="form-grid"><div class="field"><label for="si-date">日期</label><input id="si-date" type="date" value="${TODAY()}"></div><div class="field"><label for="si-type">類別</label><select id="si-type"><option value="sale">銷售</option><option value="waste">報廢</option></select></div></div>
+      <div class="field"><label for="si-text">貼上資料</label><textarea id="si-text" rows="8" placeholder="例如：&#10;CK-01	6原	5&#10;CK-01|YB-86	6原|天蠍烙(閃耀)	3&#10;生巧	2"></textarea></div>
+      <div id="si-preview"></div><p class="modal-error" hidden></p>`,
+    collect: b => {
+      const date = b.querySelector('#si-date').value, type = b.querySelector('#si-type').value, r = parseShopPaste(b.querySelector('#si-text').value);
+      if (!isDate(date)) throw Error('請選日期');
+      if (!r.items.length) throw Error('沒有對到任何產品和數量，請確認貼上的內容有品號（或品名）和數量');
+      return { date, type, items: r.items };
+    } });
+  const body = $('modalBody'), upd = () => {
+    const date = body.querySelector('#si-date').value, type = body.querySelector('#si-type').value, r = parseShopPaste(body.querySelector('#si-text').value), box = body.querySelector('#si-preview');
+    if (!r.items.length && !r.skipped.length) { box.innerHTML = ''; return; }
+    const { recs, removes, replaced } = isDate(date) ? shopImportRecords(sid, type, date, r.items) : { recs: [], removes: [], replaced: 0 };
+    const list = isDate(date) ? [...data.shops.filter(x => !removes.includes(x.id) && !recs.some(y => y.id === x.id)), ...recs] : data.shops, L = shopLedger(sid, list);
+    const rows = r.items.map(x => { const rec = recs.find(y => y.product === x.product), o = rec && L.outs.get(rec.id); return `<tr>${td(`<strong>${esc(x.product)}</strong>`)}<td class="num">${fmt(x.quantity)}</td>${td(esc(o ? shopPartsText(o.parts) || '—' : '—'))}<td class="num">${o && o.short ? badge(fmt(o.short), 'bad') : '—'}</td></tr>`; });
+    const short = sumQ(recs, rec => (L.outs.get(rec.id) || {}).short || 0);
+    box.innerHTML = `<div class="notice${short || r.skipped.length ? ' warning' : ''}">對到 ${r.items.length} 個品項、共 ${fmt(sumQ(r.items))} 個${replaced ? `；會取代 ${date} 上次匯入的 ${replaced} 筆` : ''}${short ? `；有 ${fmt(short)} 個庫存不夠扣（缺口${type === 'sale' ? '，過了可販售期的不能銷售' : ''}）` : ''}${r.skipped.length ? `；略過 ${r.skipped.length} 行（沒有對到產品或數量）：${esc(r.skipped.slice(0, 3).join('｜'))}${r.skipped.length > 3 ? '…' : ''}` : ''}</div><div class="table-scroll">${table(['產品', '數量#', '預估扣除（先到期先扣）', '缺口#'], rows, '')}</div>`;
+  };
+  for (const id of ['si-date', 'si-type', 'si-text']) body.querySelector('#' + id).addEventListener('input', upd);
+  body.querySelector('#si-type').addEventListener('change', upd);
+  const res = await pr;
+  if (!res || !can(shopPerm(sid))) return;
+  act(() => {
+    const { recs, removes } = shopImportRecords(sid, res.type, res.date, res.items);
+    if (removes.length) FEStore.removeMany('shop', removes);
+    FEStore.saveMany('shop', recs);
+    const L = shopLedger(sid), short = sumQ(recs, r => (L.outs.get(r.id) || {}).short || 0);
+    toast(`已匯入${name}門市 ${res.date} 的${SHOP_TYPES[res.type]}：${recs.length} 個品項、共 ${fmt(sumQ(recs))} 個${removes.length ? `（移除上次匯入、這次沒有的 ${removes.length} 項）` : ''}${short ? `；有 ${fmt(short)} 個庫存不夠扣，列為缺口` : ''}`, !!short, short ? 8000 : 5000);
+  });
 }
 // 可販售期設定（總公司現貨：轉現貨那天算第 1 天；門市：入貨那天算第 1 天）
 async function editShopRule() {
@@ -1446,6 +1515,7 @@ async function handleAction(el) {
   if (a === 'adjust-delete') return deleteAdjust(id);
   if (a === 'shop-rule') return editShopRule();
   if (a === 'shop-detail') return openShopDetail(el.dataset.shop, id);
+  if (a === 'shop-import') return openShopImport(el.dataset.shop);
   if (a === 'shop-delete') return deleteShopRec(el.dataset.shop, id);
   if (a === 'shop-batch') return editShopBatch(el.dataset.shop, id);
   if (a === 'store-out') return syncStoreOut(storeOutDates());
