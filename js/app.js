@@ -340,6 +340,7 @@ function render() {
   const empty = !data.opening.length && !data.movements.length;
   $('welcome').hidden = loading() || !empty || !(isAdmin() || can('produce'));
   $('recordInfo').textContent = loading() ? '讀取中…' : `共 ${data.opening.length + data.movements.length} 筆紀錄｜${data.products.length} 項產品`;
+  renderBanner();
 }
 function renderDashboard(today, current, groups, prod) {
   const todayProductions = data.movements.filter(x => x.type === 'production' && x.date === today).map(x => ({ quantity: x.quantity, unit: getUnit(x.product) }));
@@ -546,6 +547,8 @@ function renderBanner() {
   const st = FEStore.status(), b = [];
   if (st.state === 'error') b.push(`<div class="banner bad">${esc(st.detail || '無法連線到雲端')}<button class="btn small" type="button" data-action="sync">重試</button></div>`);
   else if (st.state === 'offline') b.push(`<div class="banner warn">${esc(st.detail || '目前離線')}。修改會先存在這台裝置，恢復網路後自動上傳。</div>`);
+  // 上次入口網站同步用的是舊版書籤：一直提醒，直到用新版書籤同步一次
+  { const m = portalMeta(); if (window.FEAuth && FEAuth.user() && canPortal() && m.at && (Number(m.bv) || 0) < PORTAL_BM_V) b.push(`<div class="banner bad">上次入口網站同步（${new Date(m.at).toLocaleString('zh-TW', { month: 'numeric', day: 'numeric', hour: '2-digit', minute: '2-digit' })}${m.by ? '，' + esc(m.by) : ''}）用的是<strong>舊版書籤</strong>，總表的半成品增減、現貨增減、轉試吃、手動數字與隔夜差異都<strong>沒有帶入</strong>。請到「入口網站同步」頁把「同步生產與出貨」按鈕重新拖到書籤列（取代舊的），再同步一次。<a class="btn small" href="#portal" data-view="portal">前往入口網站同步</a></div>`); }
   if (window.FEAuth && FEAuth.user() && !isAdmin() && !PERMS.some(p => can(p.id))) b.push('<div class="banner">你目前只能查看與下載資料。需要登錄生產、出貨或修改設定的話，請找管理員開權限。</div>');
   const html = b.join('');
   if (html !== lastBanner) { $('banner').innerHTML = html; lastBanner = html; }
@@ -1237,6 +1240,7 @@ const PORTAL_URL = 'https://cheeseduke.flowings.app/logistics-console';
 const PORTAL_DAYS = 14;
 const CODE_RE = /^[\w.|\-]{1,60}$/;
 const canPortal = () => can('produce') || can('ship');
+const PORTAL_BM_V = 5; // 目前書籤的版本（書籤裡的 v）；上次同步用比這個舊的書籤，畫面上方會一直提醒換書籤
 const portalMeta = () => FEStore.get('settings', 'portal') || {};
 // 預設起算日＝期初庫存（不含入口網站帶入的期初現貨 pt-o-）最晚入帳日的隔天
 function defaultSyncFrom() { const last = data.opening.reduce((m, r) => !r.id.startsWith('pt-') && r.entryDate > m ? r.entryDate : m, ''); return last ? addDays(last, 1) : ''; }
@@ -1274,7 +1278,7 @@ function cleanPortal(p) {
     days[ds] = rows;
   }
   if (!Object.keys(days).length) throw Error('沒有讀到任何日期的總表');
-  return { days, hasStock: p.v >= 2, hasConvert: p.v >= 3, hasAdjust: p.v >= 4, hasExtra: p.v >= 5, noGap: new Set(p.v >= 5 && Array.isArray(p.ng) ? p.ng.filter(isDate) : []), warn: typeof p.w === 'string' ? p.w.slice(0, 300) : '' };
+  return { days, v: p.v, hasStock: p.v >= 2, hasConvert: p.v >= 3, hasAdjust: p.v >= 4, hasExtra: p.v >= 5, noGap: new Set(p.v >= 5 && Array.isArray(p.ng) ? p.ng.filter(isDate) : []), warn: typeof p.w === 'string' ? p.w.slice(0, 300) : '' };
 }
 let portalApplying = false;
 function applyPortalPending() {
@@ -1403,7 +1407,7 @@ function applyPortalPending() {
     if (saves.length) FEStore.saveMany('moves', saves.map(recordBody));
     if (removes.length) FEStore.removeMany('moves', removes);
     const meta = portalMeta(), changed = saves.length + removes.length + openSaves.length + openRemoves.length;
-    FEStore.save('settings', { ...meta, id: 'portal', at: Date.now(), by: who, first: dates[0] || '', last: dates[dates.length - 1] || '', days: dates.length, ...sum, pQ: clampQty(sum.pQ), sQ: clampQty(sum.sQ), qQ: clampQty(sum.qQ), cQ: clampQty(sum.cQ), ...(stockOpen.set ? { stockOpenDate: from, stockOpenN: stockOpen.n, stockOpenQ: clampQty(stockOpen.q) } : {}), newProducts: newProducts.length, changed, warn: c.warn });
+    FEStore.save('settings', { ...meta, id: 'portal', at: Date.now(), by: who, bv: c.v, first: dates[0] || '', last: dates[dates.length - 1] || '', days: dates.length, ...sum, pQ: clampQty(sum.pQ), sQ: clampQty(sum.sQ), qQ: clampQty(sum.qQ), cQ: clampQty(sum.cQ), ...(stockOpen.set ? { stockOpenDate: from, stockOpenN: stockOpen.n, stockOpenQ: clampQty(stockOpen.q) } : {}), newProducts: newProducts.length, changed, warn: c.warn });
     const range = dates.length ? `${shortDate(dates[0])}～${shortDate(dates[dates.length - 1])}` : '沒有可匯入的日期';
     const parts = [okP ? `${modeB === dates.length && dates.length ? '當天生產' : modeB ? '半成品入庫／當天生產' : '半成品入庫'} ${sum.pN} 筆（${fmt(sum.pQ)} 個）` : '', okP && c.hasStock && sum.qN ? `生產轉現貨 ${sum.qN} 筆（${fmt(sum.qQ)} 個）` : '', okP && c.hasConvert && sum.cN ? `半成品轉現貨 ${sum.cN} 筆（${fmt(sum.cQ)} 個）` : '', okP && c.hasAdjust && sum.jN ? `半成品／現貨增減 ${sum.jN} 筆${sum.gN ? `（其中隔夜差異 ${sum.gN} 筆）` : ''}` : '', okS ? `出貨 ${sum.sN} 筆（${fmt(sum.sQ)} 個）` : ''].filter(Boolean).join('、');
     const notes = [modeB ? `${modeB === dates.length ? '全部' : `其中 ${modeB} 天`}用全現貨模式（${stockFromDate()} 起）` : '', stockOpen.set ? `期初現貨 ${stockOpen.n} 個品號（${fmt(stockOpen.q)} 個，${from}）` : '', !c.hasExtra ? '這是舊版書籤，' + (!c.hasStock ? '沒有帶入現貨' : !c.hasConvert ? '沒有帶入半成品轉現貨' : !c.hasAdjust ? '沒有帶入半成品／現貨增減' : '沒有帶入總表的手動數字與隔夜差異') + '，請到「入口網站同步」重新拖曳書籤' : '', dates.some(d => c.noGap.has(d)) ? `${dates.filter(d => c.noGap.has(d)).map(shortDate).join('、')} 沒讀到前一天的總表，隔夜差異沒有更新` : '', newProducts.length ? `新增產品 ${newProducts.length} 項` : '', skippedCodes.size ? `略過 ${prefixes.join('、')} 以外的品號 ${skippedCodes.size} 個` : '', excludedCodes.size ? `略過${EXCLUDE_WORDS.join('、')} ${excludedCodes.size} 個品號` : '', before.length ? `起算日 ${from} 以前的 ${before.length} 天沒有匯入` : '', !okP ? '你沒有生產權限，生產數字沒有存' : '', !okS ? '你沒有出貨權限，出貨數字沒有存' : '', c.warn ? '注意：' + c.warn : ''].filter(Boolean).join('；');
