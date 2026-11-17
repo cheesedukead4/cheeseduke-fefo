@@ -201,6 +201,14 @@ html.auth-locked .app{display:none}
 .rq input{width:54px;border:1px solid var(--line);border-radius:6px;padding:4px 6px;text-align:right;background:var(--surface);color:var(--ink);font-size:13px}
 .rq-sum{font-size:12px;font-weight:700;color:var(--ok-fg,var(--muted))}
 .rq-sum.bad{color:var(--bad-fg)}
+/* 門市頁的分頁 */
+.stabs{display:flex;gap:4px;margin:0 0 18px;border-bottom:1px solid var(--line);overflow-x:auto;scrollbar-width:none}
+.stabs::-webkit-scrollbar{display:none}
+.stabs button{border:0;background:transparent;padding:10px 16px;font-size:14px;font-weight:700;color:var(--muted);border-bottom:3px solid transparent;margin-bottom:-1px;white-space:nowrap;cursor:pointer}
+.stabs button:hover{color:var(--ink-2)}
+.stabs button.on{color:var(--accent-ink);border-bottom-color:var(--accent)}
+.shop-pane[hidden]{display:none}
+@media (max-width:520px){.stabs{gap:0}.stabs button{padding:10px 9px;font-size:13px}}
 /* 門市入貨的推定批號 */
 .guess{display:inline-block;margin-left:4px;padding:0 4px;border:1px dashed currentColor;border-radius:4px;font-size:10px;line-height:1.5;opacity:.85}
 .hbar>div{height:1px}

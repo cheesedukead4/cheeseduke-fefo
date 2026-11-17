@@ -881,9 +881,11 @@ function factoryBatches(product) {
 function shopSectionHtml(s) {
   const id = s.id, n = esc(s.name);
   return `<section id="shop-${id}" class="section">
-    <div class="notice"><span id="shopRule-${id}"></span> <button type="button" class="btn small need-setting" data-action="shop-rule">修改可販售期</button> <button type="button" class="btn small need-storeout" data-action="store-out" title="讀揀貨總表的排單表，把各門市的出庫量帶入成入貨（批號自動推定）">從揀貨總表帶入今天的入貨</button></div>
-    <div id="shopKpi-${id}" class="grid-kpi"></div>
-    <div class="panel need-shop_${id}"><div class="panel-head"><div><h2>${n}門市入貨確認</h2><p id="rcvInfo-${id}"></p></div><div class="toolbar"><input id="rcvDate-${id}" class="search" type="date" aria-label="入貨日期"></div></div><div id="rcvList-${id}" class="table-scroll"></div></div>
+    <div class="stabs" id="stabs-${id}" role="tablist" aria-label="${n}門市分頁"><button type="button" role="tab" data-stab="recv">門市入貨確認</button><button type="button" role="tab" data-stab="entry">入貨／銷售／報廢匯入</button><button type="button" role="tab" data-stab="stock">門市庫存</button></div>
+    <div class="shop-pane" data-pane="recv">
+    <div class="panel"><div class="panel-head"><div><h2>${n}門市入貨確認</h2><p id="rcvInfo-${id}"></p></div><div class="toolbar"><button type="button" class="btn small need-storeout" data-action="store-out" title="讀揀貨總表的排單表，把各門市的出庫量帶入成入貨（批號自動推定）">從揀貨總表帶入今天的入貨</button><input id="rcvDate-${id}" class="search" type="date" aria-label="入貨日期"></div></div><div id="rcvList-${id}" class="table-scroll"></div></div>
+    </div>
+    <div class="shop-pane" data-pane="entry">
     <div class="panel form-area need-shop_${id}"><div class="panel-head"><div><h2>登錄${n}門市入貨／銷售／報廢</h2><p>銷售、報廢可以按右邊「批次匯入」從 Excel／POS 報表一次貼上；入貨會從揀貨總表帶入，批號可以不填（照總公司當天的出貨扣批自動推定）。</p></div><div class="toolbar"><button type="button" class="btn small primary" data-action="shop-import" data-shop="${id}">批次匯入銷售／報廢</button></div></div><div class="panel-body"><form id="shopForm-${id}" class="form-grid" novalidate>
       <div class="field"><label for="shDate-${id}">日期 *</label><input id="shDate-${id}" type="date" required></div>
       <div class="field"><label for="shType-${id}">類別 *</label><select id="shType-${id}"><option value="in">入貨（配送到門市）</option><option value="sale">銷售</option><option value="waste">報廢</option></select></div>
@@ -893,13 +895,28 @@ function shopSectionHtml(s) {
       <div class="field span2"><label for="shNote-${id}">備註</label><input id="shNote-${id}" maxlength="180" placeholder="選填"></div>
       <div class="field span4"><div id="shPreview-${id}" class="notice" hidden></div><div class="form-actions"><button type="submit" class="btn primary">＋ 儲存</button></div></div>
     </form></div></div>
-    <div class="panel"><div class="panel-head"><div><h2>${n}門市庫存（依批號）</h2><p id="shopCount-${id}"></p></div><div class="toolbar"><div class="seg" id="shopSeg-${id}" role="group" aria-label="到期篩選"><button type="button" data-smode="all" class="on">全部</button><button type="button" data-smode="soon"><span class="seg-lab">快到期</span><span class="seg-n" hidden></span></button><button type="button" data-smode="expired">已過期<span class="seg-n" hidden></span></button></div><input id="shopFilter-${id}" class="search" type="search" placeholder="搜尋產品／批號" aria-label="搜尋${n}門市庫存"></div></div><div id="shopStock-${id}" class="table-scroll"></div></div>
     <div class="panel"><div class="panel-head"><div><h2>${n}門市入貨／銷售／報廢紀錄</h2><p id="shopRecCount-${id}"></p></div><div class="toolbar"><input id="shopRecFilter-${id}" class="search" type="search" placeholder="搜尋日期／產品／批號／備註" aria-label="搜尋${n}門市紀錄"><button type="button" class="btn small" data-action="csv-shop" title="三間門市的紀錄一起匯出">匯出 CSV</button></div></div><div id="shopRecs-${id}" class="table-scroll"></div></div>
+    </div>
+    <div class="shop-pane" data-pane="stock">
+    <div class="notice"><span id="shopRule-${id}"></span> <button type="button" class="btn small need-setting" data-action="shop-rule">修改可販售期</button></div>
+    <div id="shopKpi-${id}" class="grid-kpi"></div>
+    <div class="panel"><div class="panel-head"><div><h2>${n}門市庫存（依批號）</h2><p id="shopCount-${id}"></p></div><div class="toolbar"><div class="seg" id="shopSeg-${id}" role="group" aria-label="到期篩選"><button type="button" data-smode="all" class="on">全部</button><button type="button" data-smode="soon"><span class="seg-lab">快到期</span><span class="seg-n" hidden></span></button><button type="button" data-smode="expired">已過期<span class="seg-n" hidden></span></button></div><input id="shopFilter-${id}" class="search" type="search" placeholder="搜尋產品／批號" aria-label="搜尋${n}門市庫存"></div></div><div id="shopStock-${id}" class="table-scroll"></div></div>
+    </div>
   </section>`;
 }
+// 門市頁的三個分頁：recv 門市入貨確認｜entry 入貨／銷售／報廢匯入｜stock 門市庫存（記在這台瀏覽器）
+const SHOP_TABS = ['recv', 'entry', 'stock'];
+const shopTab = Object.fromEntries(SHOPS.map(x => { let t = 'recv'; try { t = localStorage.getItem('fe_shoptab_' + x.id) || 'recv'; } catch (e) {} return [x.id, SHOP_TABS.includes(t) ? t : 'recv']; }));
+function applyShopTab(sid) {
+  const sec = $('shop-' + sid); if (!sec) return;
+  sec.querySelectorAll('[data-stab]').forEach(b => { const on = b.dataset.stab === shopTab[sid]; b.classList.toggle('on', on); b.setAttribute('aria-selected', on ? 'true' : 'false'); });
+  sec.querySelectorAll('.shop-pane').forEach(p => { p.hidden = p.dataset.pane !== shopTab[sid]; });
+}
+function setShopTab(sid, t) { if (!SHOP_TABS.includes(t)) return; shopTab[sid] = t; try { localStorage.setItem('fe_shoptab_' + sid, t); } catch (e) {} applyShopTab(sid); }
 function buildShops() {
   document.querySelector('.nav-btn[data-view="manage"]').insertAdjacentHTML('beforebegin', '<div class="nav-title">門市庫存</div>' + SHOPS.map(s => `<a class="nav-btn" href="#shop-${s.id}" data-view="shop-${s.id}"><span class="nav-ico" aria-hidden="true">⌂</span>${esc(s.name)}門市</a>`).join(''));
   $('users').insertAdjacentHTML('beforebegin', SHOPS.map(shopSectionHtml).join(''));
+  SHOPS.forEach(x => applyShopTab(x.id));
 }
 const shopChip = (r, out, plan) => {
   const u = esc(getUnit(r.product)), short = out && out.short > 0, isIn = r.type === 'in', unk = shopUnknownQ(r, plan);
@@ -1684,6 +1701,7 @@ function bind() {
     for (const f of ['shQty-', 'shBatch-']) $(f + id).addEventListener('input', () => shopFormSync(id));
     for (const f of ['shopFilter-', 'shopRecFilter-']) $(f + id).addEventListener('input', scheduleRender);
     $('shopSeg-' + id).addEventListener('click', e => { const b = e.target.closest('[data-smode]'); if (!b) return; shopMode[id] = b.dataset.smode; scheduleRender(); });
+    $('stabs-' + id).addEventListener('click', e => { const b = e.target.closest('[data-stab]'); if (b) setShopTab(id, b.dataset.stab); });
     $('rcvDate-' + id).addEventListener('change', e => { if (isDate(e.target.value)) { rcvDate[id] = e.target.value; scheduleRender(); } });
   }
   $('settingsForm').addEventListener('submit', e => { e.preventDefault(); if (!can('setting')) return; const mw = Number($('semiWarn').value), sh = Number($('defaultShelf').value), k = Number($('stockDays').value), kw = Number($('stockWarn').value); if (!Number.isInteger(mw) || mw < 1 || mw > 365 || !Number.isInteger(sh) || sh < 0 || sh > 36500) { toast('請填寫有效的半成品警示天數（1～365）與保存天數（整數）', true); return; } if (!Number.isInteger(k) || k < 1 || k > 365 || !Number.isInteger(kw) || kw < 0 || kw > 60) { toast('現貨可放天數要是 1～365、現貨提醒天數要是 0～60 的整數', true); return; } act(() => { FEStore.save('settings', { id: 'main', warnDays: data.settings.warnDays, defaultShelf: sh, stockDays: k, stockWarn: kw, semiWarn: mw }); toast(`系統設定已儲存：現貨可放 ${k} 天、剩 ${kw} 天內提醒；半成品剩 ${mw} 天內警示`); }); });
