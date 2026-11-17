@@ -68,7 +68,7 @@ const expShow = d => d === NO_EXPIRY ? '—' : d;
 // 不需要管理的產品：品名含這些字的（例如「CK-08|YA-23 6朱|擺盤」）不同步、不顯示，所有表格與計算都當作不存在
 const EXCLUDE_WORDS = ['擺盤'];
 const isExcluded = name => EXCLUDE_WORDS.some(w => String(name || '').includes(w));
-const blankState = () => ({ version: 1, products: [], opening: [], movements: [], shops: [], settings: { warnDays: 30, defaultShelf: 30 } });
+const blankState = () => ({ version: 1, products: [], opening: [], movements: [], shops: [], settings: { warnDays: 30, defaultShelf: 30, stockDays: 12, stockWarn: 3 } });
 
 /* ---------- 狀態 ---------- */
 let data = blankState();
@@ -89,8 +89,9 @@ function normProduct(p) {
   return { id: clean(p.id) || productId(p.name), name: clean(p.name), unit: clean(p.unit) || '個', shelfDays: Number.isInteger(sd) && sd >= 0 ? sd : 30, lowStock: low > 0 ? low : 0 };
 }
 function normSettings(s) {
-  const w = Number(s?.warnDays), d = Number(s?.defaultShelf);
-  return { warnDays: Number.isInteger(w) && w > 0 ? w : 30, defaultShelf: Number.isInteger(d) && d >= 0 ? d : 30 };
+  const w = Number(s?.warnDays), d = Number(s?.defaultShelf), k = Number(s?.stockDays), kw = Number(s?.stockWarn);
+  // stockDays：總公司現貨可放幾天（有效日期＝轉現貨日＋幾天）；stockWarn：現貨剩幾天以內算「現貨到期」
+  return { warnDays: Number.isInteger(w) && w > 0 ? w : 30, defaultShelf: Number.isInteger(d) && d >= 0 ? d : 30, stockDays: Number.isInteger(k) && k >= 1 && k <= 365 ? k : 12, stockWarn: Number.isInteger(kw) && kw >= 0 && kw <= 60 ? kw : 3 };
 }
 function sanitizeRec(r) {
   if (!r || typeof r !== 'object' || !r.id) return null;
@@ -150,7 +151,7 @@ function replaceAll(st) {
   const uniq = (arr, key) => { const seen = new Set(); return arr.filter(x => !seen.has(key(x)) && seen.add(key(x))); };
   FEStore.replaceKinds({
     products: uniq(st.products, p => p.name).map(p => ({ id: productId(p.name), name: p.name, unit: p.unit, shelfDays: p.shelfDays, lowStock: p.lowStock })),
-    settings: [{ id: 'main', warnDays: st.settings.warnDays, defaultShelf: st.settings.defaultShelf }],
+    settings: [{ id: 'main', warnDays: st.settings.warnDays, defaultShelf: st.settings.defaultShelf, stockDays: st.settings.stockDays, stockWarn: st.settings.stockWarn }],
     opening: uniq(st.opening, r => r.id).map(r => strip({ ...r, type: 'opening' })),
     moves: uniq(st.movements, r => r.id).map(strip),
     ...(Array.isArray(st.shops) ? { shop: uniq(st.shops, r => r.id).map(strip) } : {}), // 舊備份沒有門市資料時不動門市
@@ -215,10 +216,10 @@ function sellStatus(name, expiry, today) {
   const warn = d <= s.days - s.warnFrom, n = s.days - d;
   return { label: `${n >= 1 ? `第 ${n} 天・` : ''}剩 ${d} 天`, cls: warn ? 'critical' : 'ok', d, warn };
 }
-// 產品的保存天數（總公司現貨的有效日期＝轉現貨那天＋保存天數）
-const shelfOf = (name, st = data) => { const p = st.products.find(x => x.name === name), n = p ? Number(p.shelfDays) : NaN; return Number.isFinite(n) && n >= 0 ? n : (st.settings && Number(st.settings.defaultShelf)) || 30; };
-// 入口網站帶入的生產轉現貨：有效日期＝當天＋保存天數（照產品現在的保存天數算）
-const prodExp = r => r.type === 'production' && r.pool === 'stock' && String(r.id).startsWith('pt-q-') ? addDays(r.manufactureDate, shelfOf(r.product)) : r.expiryDate;
+// 總公司現貨可放幾天（現階段 12 天，「資料與設定」可改）：現貨有效日期＝轉現貨日（製作日期）＋這個天數；半成品照產品的保存天數（30 天）
+const stockDaysOf = (st = data) => (st.settings && st.settings.stockDays) || 12;
+// 入口網站帶入的生產轉現貨：有效日期＝當天＋現貨可放天數
+const prodExp = (r, st = data) => r.type === 'production' && r.pool === 'stock' && String(r.id).startsWith('pt-q-') ? addDays(r.manufactureDate, stockDaysOf(st)) : r.expiryDate;
 function calculateLedger(asOf = '9999-12-31', st = data) {
   const events = [], prio = { production: 0, convert: 1, shipment: 2 };
   for (const x of st.opening) if (x.entryDate <= asOf) events.push({ date: x.entryDate, priority: 0, seq: x.seq || 0, type: 'opening', item: x });
@@ -232,7 +233,7 @@ function calculateLedger(asOf = '9999-12-31', st = data) {
   for (const e of events) {
     const x = e.item;
     if (e.type === 'opening' || e.type === 'production') {
-      addLot({ id: x.id, source: e.type, pool: x.pool === 'stock' ? 'stock' : 'semi', product: x.product, batch: x.batch, manufactureDate: x.manufactureDate, expiryDate: e.type === 'production' ? prodExp(x) : x.expiryDate, entryDate: e.date, quantity: Number(x.quantity), used: 0, shipped: 0, converted: 0, remaining: Number(x.quantity), seq: x.seq || 0, unit: getUnit(x.product, st) });
+      addLot({ id: x.id, source: e.type, pool: x.pool === 'stock' ? 'stock' : 'semi', product: x.product, batch: x.batch, manufactureDate: x.manufactureDate, expiryDate: e.type === 'production' ? prodExp(x, st) : x.expiryDate, entryDate: e.date, quantity: Number(x.quantity), used: 0, shipped: 0, converted: 0, remaining: Number(x.quantity), seq: x.seq || 0, unit: getUnit(x.product, st) });
       continue;
     }
     if (e.type === 'adjust') {
@@ -241,8 +242,8 @@ function calculateLedger(asOf = '9999-12-31', st = data) {
       if (x.dir === 'add') {
         // 現貨增加：同一天、同一個品號開頭（例如 CK-01 與 CK-01|YB-86 換盒）在包裝區減掉的半成品，照順序變成這裡的現貨（記下來源）；
         //           換盒跟轉現貨一樣，當天算第一天：製作日期與有效日期用這筆紀錄的（入口網站帶入的＝當天、當天＋保存天數）。批號用當天
-        // 入口網站帶入的現貨增加（換盒、總表手動、隔夜差異）：有效日期＝製作日期＋保存天數；手動登錄的照紀錄填的
-        const pool = packPool.get(baseCode(x.product) + '|' + e.date) || [], parts = [], xExp = String(x.id).startsWith('pt-') ? addDays(x.manufactureDate, shelfOf(x.product, st)) : x.expiryDate; let need = Number(x.quantity), k = 0;
+        // 入口網站帶入的現貨增加（換盒、總表手動、隔夜差異）：有效日期＝製作日期＋現貨可放天數；手動登錄的照紀錄填的
+        const pool = packPool.get(baseCode(x.product) + '|' + e.date) || [], parts = [], xExp = String(x.id).startsWith('pt-') ? addDays(x.manufactureDate, stockDaysOf(st)) : x.expiryDate; let need = Number(x.quantity), k = 0;
         for (const p of pool) { if (need <= 1e-7) break; if (p.left <= 1e-7) continue; const q = clampQty(Math.min(need, p.left)); p.left = clampQty(p.left - q); need = clampQty(need - q); addLot({ ...lotBase, id: `${x.id}#${k++}`, pool: 'stock', batch: makeBatch(x.product, e.date) || '—', manufactureDate: x.manufactureDate, expiryDate: xExp, quantity: q, remaining: q, fromMfg: p.manufactureDate, fromExp: p.expiryDate }); parts.push({ manufactureDate: x.manufactureDate, expiryDate: xExp, quantity: q, from: p.product, fromMfg: p.manufactureDate }); }
         if (need > 1e-7) { addLot({ ...lotBase, id: `${x.id}#${k++}`, pool: 'stock', batch: makeBatch(x.product, e.date) || '—', manufactureDate: x.manufactureDate, expiryDate: xExp, quantity: need, remaining: need }); parts.push({ manufactureDate: x.manufactureDate, expiryDate: xExp, quantity: need }); }
         adjusts.set(x.id, { required: Number(x.quantity), done: Number(x.quantity), shortage: 0, parts });
@@ -258,15 +259,15 @@ function calculateLedger(asOf = '9999-12-31', st = data) {
     }
     const usable = l => l.remaining > 1e-7 && l.expiryDate >= e.date && l.manufactureDate <= e.date && l.entryDate <= e.date;
     if (e.type === 'convert') {
-      // 半成品轉現貨：從效期最早的半成品轉（之前的先，當天入庫的最後）；轉現貨那天算第一天（製作日期＝轉現貨日，有效日期＝轉現貨日＋保存天數）
+      // 半成品轉現貨：從效期最早的半成品轉（之前的先，當天入庫的最後）；轉現貨那天算第一天（製作日期＝轉現貨日，有效日期＝轉現貨日＋現貨可放天數）
       const from = (byProduct.get(x.product) || []).filter(l => l.pool === 'semi' && usable(l)).sort((a, b) => (prior(a, e.date) ? 0 : 1) - (prior(b, e.date) ? 0 : 1) || tie(a, b));
       const required = Number(x.quantity); let need = required;
       for (const lot of from) {
         if (need <= 1e-7) break;
         const q = clampQty(Math.min(need, lot.remaining));
         lot.remaining = clampQty(lot.remaining - q); lot.used = clampQty(lot.used + q); lot.converted = clampQty(lot.converted + q); need = clampQty(need - q);
-        // 半成品轉現貨：轉現貨那天算第一天，批號、製作日期都用轉現貨當天，有效日期＝轉現貨日＋保存天數（記下原本半成品的製作／有效日期）
-        addLot({ id: x.id + '#' + lot.id, source: 'convert', pool: 'stock', product: lot.product, batch: makeBatch(lot.product, e.date) || '—', manufactureDate: e.date, expiryDate: addDays(e.date, shelfOf(lot.product, st)), fromMfg: lot.manufactureDate, fromExp: lot.expiryDate, entryDate: e.date, quantity: q, used: 0, shipped: 0, converted: 0, remaining: q, seq: x.seq || 0, unit: lot.unit, fromLot: lot.id });
+        // 半成品轉現貨：轉現貨那天算第一天，批號、製作日期都用轉現貨當天，有效日期＝轉現貨日＋現貨可放天數（記下原本半成品的製作／有效日期）
+        addLot({ id: x.id + '#' + lot.id, source: 'convert', pool: 'stock', product: lot.product, batch: makeBatch(lot.product, e.date) || '—', manufactureDate: e.date, expiryDate: addDays(e.date, stockDaysOf(st)), fromMfg: lot.manufactureDate, fromExp: lot.expiryDate, entryDate: e.date, quantity: q, used: 0, shipped: 0, converted: 0, remaining: q, seq: x.seq || 0, unit: lot.unit, fromLot: lot.id });
       }
       converts.set(x.id, { required, moved: clampQty(required - need), shortage: clampQty(need) });
       continue;
@@ -297,7 +298,8 @@ function productSummary(ledger, asOf = TODAY()) {
   const by = new Map(); for (const l of ledger.lots) { if (!by.has(l.product)) by.set(l.product, []); by.get(l.product).push(l); }
   return data.products.map(p => { const lots = by.get(p.name) || []; const usable = clampQty(lots.filter(x => x.expiryDate >= asOf).reduce((s, x) => s + x.remaining, 0)); const stock = clampQty(lots.filter(x => x.pool === 'stock' && x.expiryDate >= asOf).reduce((s, x) => s + x.remaining, 0)), semi = clampQty(usable - stock); const expired = clampQty(lots.filter(x => x.expiryDate < asOf).reduce((s, x) => s + x.remaining, 0)); const warning = clampQty(lots.filter(x => x.expiryDate >= asOf && dayDiff(asOf, x.expiryDate) <= data.settings.warnDays).reduce((s, x) => s + x.remaining, 0)); const oldest = lots.filter(x => x.remaining > 0 && x.expiryDate >= asOf && x.expiryDate !== NO_EXPIRY).sort((a, b) => cmp(a.expiryDate, b.expiryDate))[0]?.expiryDate || ''; const produced = clampQty(lots.filter(x => x.source === 'production').reduce((s, x) => s + x.quantity, 0)); const opened = clampQty(lots.filter(x => x.source === 'opening').reduce((s, x) => s + x.quantity, 0)); const used = clampQty(lots.reduce((s, x) => s + x.shipped, 0)); return { ...p, usable, stock, semi, expired, warning, oldest, produced, opened, used }; }).sort((a, b) => productOrder(a.name, b.name));
 }
-function expiryStatus(expiry, qty, date = TODAY()) { if (qty <= 0) return { label: '已用完', cls: 'other' }; if (expiry === NO_EXPIRY) return { label: '現貨', cls: 'future' }; const days = dayDiff(date, expiry); if (days < 0) return { label: '已過期', cls: 'expired' }; if (days <= 7) return { label: days === 0 ? '今日到期' : `剩 ${days} 天`, cls: 'critical' }; if (days <= data.settings.warnDays) return { label: `剩 ${days} 天`, cls: 'due' }; return { label: '正常', cls: 'ok' }; }
+// pool 'stock'：現貨剩「現貨提醒天數」以內是紅色；半成品照原本（7 天內紅、預警天數內黃）
+function expiryStatus(expiry, qty, date = TODAY(), pool = '') { if (qty <= 0) return { label: '已用完', cls: 'other' }; if (expiry === NO_EXPIRY) return { label: '現貨', cls: 'future' }; const days = dayDiff(date, expiry); if (days < 0) return { label: '已過期', cls: 'expired' }; if (pool === 'stock') return days <= data.settings.stockWarn ? { label: days === 0 ? '今日到期' : `剩 ${days} 天`, cls: 'critical' } : { label: `剩 ${days} 天`, cls: 'ok' }; if (days <= 7) return { label: days === 0 ? '今日到期' : `剩 ${days} 天`, cls: 'critical' }; if (days <= data.settings.warnDays) return { label: `剩 ${days} 天`, cls: 'due' }; return { label: '正常', cls: 'ok' }; }
 
 /* ---------- 表格與畫面 ---------- */
 const badge = (label, cls) => `<span class="pill ${cls}">${esc(label)}</span>`;
@@ -344,10 +346,12 @@ function renderDashboard(today, current, groups, prod) {
   const todayShip = data.movements.filter(x => x.type === 'shipment' && x.date === today).map(x => ({ quantity: current.shipments.get(x.id)?.shipped || 0, unit: getUnit(x.product) }));
   const usableProducts = prod.filter(x => x.usable > 0).length;
   const live = groups.filter(x => x.remaining > 0);
-  const due = live.filter(x => { const d = dayDiff(today, x.expiryDate); return d >= 0 && d <= data.settings.warnDays; }).length;
-  const due7 = live.filter(x => { const d = dayDiff(today, x.expiryDate); return d >= 0 && d <= 7; }).length;
+  // 效期預警：現貨剩「現貨提醒天數」以內、半成品 15 天內（期初現貨沒有效期不算）
+  const isStk = x => x.pool === 'stock' || (x.batch && x.batch !== '—');
+  const dueStock = live.filter(x => isStk(x) && x.expiryDate !== NO_EXPIRY && dayDiff(today, x.expiryDate) >= 0 && dayDiff(today, x.expiryDate) <= data.settings.stockWarn).length;
+  const dueSemi = live.filter(x => !isStk(x) && dayDiff(today, x.expiryDate) >= 0 && dayDiff(today, x.expiryDate) <= SOON_DAYS).length, due = dueStock + dueSemi;
   const expired = live.filter(x => x.expiryDate < today).length;
-  $('summaryCards').innerHTML = `<article class="kpi"><div class="kpi-label">今日生產量</div><div class="kpi-value">${unitsLabel(todayProductions)}</div><div class="kpi-desc">已登錄 ${todayProductions.length} 筆生產</div></article><article class="kpi"><div class="kpi-label">今日實際出貨量</div><div class="kpi-value">${unitsLabel(todayShip)}</div><div class="kpi-desc">已登錄 ${todayShip.length} 筆出貨需求</div></article><article class="kpi"><div class="kpi-label">目前有庫存產品</div><div class="kpi-value">${usableProducts}<span class="kpi-unit">種</span></div><div class="kpi-desc">所有庫存以產品個別單位計算</div></article><article class="kpi ${expired ? 'bad' : due ? 'warn' : ''}"><div class="kpi-label">效期預警批次</div><div class="kpi-value">${due}<span class="kpi-unit">批</span></div><div class="kpi-desc">7 天內 ${due7} 批｜已過期 ${expired} 批</div></article>`;
+  $('summaryCards').innerHTML = `<article class="kpi"><div class="kpi-label">今日生產量</div><div class="kpi-value">${unitsLabel(todayProductions)}</div><div class="kpi-desc">已登錄 ${todayProductions.length} 筆生產</div></article><article class="kpi"><div class="kpi-label">今日實際出貨量</div><div class="kpi-value">${unitsLabel(todayShip)}</div><div class="kpi-desc">已登錄 ${todayShip.length} 筆出貨需求</div></article><article class="kpi"><div class="kpi-label">目前有庫存產品</div><div class="kpi-value">${usableProducts}<span class="kpi-unit">種</span></div><div class="kpi-desc">所有庫存以產品個別單位計算</div></article><article class="kpi ${expired ? 'bad' : due ? 'warn' : ''}"><div class="kpi-label">效期預警批次</div><div class="kpi-value">${due}<span class="kpi-unit">批</span></div><div class="kpi-desc">現貨到期 ${dueStock}｜半成品到期 ${dueSemi}｜已過期 ${expired} 批</div></article>`;
   const shortCount = [...current.shipments.values()].filter(x => x.shortage > 0).length;
   const alert = $('shortageAlert'); alert.hidden = shortCount === 0; if (shortCount) alert.innerHTML = `目前有 <strong>${shortCount}</strong> 筆出貨未能足額分配。出貨缺口不列入實際出貨、不產生負庫存，請前往「每日出貨登錄」檢視。`;
   const chartDays = Array.from({ length: 7 }, (_, i) => addDays(today, i - 6));
@@ -355,9 +359,10 @@ function renderDashboard(today, current, groups, prod) {
   const max = Math.max(0, ...trend.flatMap(x => [x.prod, x.ship])); const h = v => v > 0 && max > 0 ? Math.max(2, Math.round(v / max * 100)) : 0;
   $('trendChart').innerHTML = trend.map(x => `<div class="chart-day${x.date === today ? ' today' : ''}" title="${x.date}：生產 ${fmt(x.prod)}，出貨 ${fmt(x.ship)}"><div class="chart-bars"><div class="bar produced" style="height:${h(x.prod)}%"></div><div class="bar shipped" style="height:${h(x.ship)}%"></div></div><span>${x.date === today ? '今天' : shortDate(x.date)}</span></div>`).join('');
   $('chartScale').textContent = max > 0 ? `最高柱 = ${fmt(max)}（混合單位時僅供趨勢參考）` : '近 7 天尚無生產或出貨';
-  // 庫存效期預警：15 天內到期與已過期，每個品號一列，各有效日期的數量列在同一列
-  const warnRows = [...byProductExpiry(groups).values()].map(p => ({ ...p, exps: p.exps.filter(e => isSoon(e, today) || isGone(e, today)) })).filter(p => p.exps.length).sort((a, b) => productOrder(a.product, b.product));
-  $('dashExpiry').innerHTML = table(['產品', `${SOON_DAYS} 天內到期與已過期的有效日期`, '數量#', '剩餘庫存#', '最早效期狀態'], warnRows.map(p => { const q = clampQty(p.exps.reduce((s, e) => s + e.total, 0)), s = expiryStatus(p.exps[0].expiry, q, today); return `<tr>${td(`<strong>${esc(p.product)}</strong>`)}<td class="exp-cell"><div class="exp-chips">${p.exps.map(e => expChip(e, p.unit, today)).join('')}</div></td><td class="num">${fmt(q)} ${esc(p.unit)}</td><td class="num">${fmt(p.total)} ${esc(p.unit)}</td>${td(badge(s.label, s.cls))}</tr>`; }), `目前沒有 ${SOON_DAYS} 天內到期或已過期的庫存`);
+  // 庫存效期預警：分「現貨到期」（剩現貨提醒天數以內）與「半成品到期」（15 天內），已過期的也列；每個品號一列
+  const warnRows = [...byProductExpiry(groups).values()].map(p => ({ ...p, sx: p.exps.filter(e => e.kind === 'stock' && (isStockSoon(e, today) || isGone(e, today))), mx: p.exps.filter(e => e.kind === 'semi' && (isSemiSoon(e, today) || isGone(e, today))) })).filter(p => p.sx.length || p.mx.length).sort((a, b) => productOrder(a.product, b.product));
+  const chips = (list, u) => list.length ? `<div class="exp-chips">${list.map(e => expChip(e, u, today)).join('')}</div>` : '<span class="who">—</span>';
+  $('dashExpiry').innerHTML = table(['產品', `現貨到期（剩 ${data.settings.stockWarn} 天內）與已過期`, `半成品到期（${SOON_DAYS} 天內）與已過期`, '剩餘庫存#'], warnRows.map(p => `<tr>${td(`<strong>${esc(p.product)}</strong>`)}<td class="exp-cell">${chips(p.sx, p.unit)}</td><td class="exp-cell">${chips(p.mx, p.unit)}</td><td class="num">${fmt(p.total)} ${esc(p.unit)}</td></tr>`), '目前沒有快到期或已過期的現貨、半成品');
   // 近期出貨：最近 7 天，每個品號一列，各日期的出貨量列在同一列（有缺口的標紅）
   const since = addDays(today, -6), recent = data.movements.filter(x => x.type === 'shipment' && x.date <= today && x.date >= since);
   $('dashShipments').innerHTML = table(['產品', '最近 7 天出貨（日期新到舊）', '需求量#', '實際出貨#', '缺口#'], groupByProduct(recent, '', []).map(g => { const t = shipTotals(g.recs, current); return `<tr>${td(`<strong>${esc(g.product)}</strong>`)}${chipCell(g.recs, r => shipChip(r, current), 'shipment', g.product)}<td class="num">${fmt(t.req)} ${esc(getUnit(g.product))}</td><td class="num">${fmt(t.shipped)}</td><td class="num">${t.short ? badge(fmt(t.short), 'bad') : '—'}</td></tr>`; }), '最近 7 天沒有出貨紀錄');
@@ -436,9 +441,10 @@ const closeModal = () => { if (!$('modal').hidden) $('modalCancel').click(); };
 // 每個產品一列：同一個有效日期合在一起，不同有效日期分開列（顏色＝效期狀態）；逐批號的明細用「匯出 CSV」
 // 排列照 productOrder（品號開頭 CK、CC、CA、CS、CL）
 const SOON_DAYS = 15;
-// 15 天內到期（不含已過期）／已過期：半成品、現貨一樣看有效日期
+// 現貨到期：現貨剩「現貨提醒天數」以內（不含已過期）；半成品到期：半成品 15 天內（不含已過期）；已過期：兩種都算
 const isGone = (e, today) => e.expiry !== NO_EXPIRY && dayDiff(today, e.expiry) < 0;
-const isSoon = (e, today) => { if (e.expiry === NO_EXPIRY) return false; const d = dayDiff(today, e.expiry); return d >= 0 && d <= SOON_DAYS; };
+const isStockSoon = (e, today) => { if (e.kind !== 'stock' || e.expiry === NO_EXPIRY) return false; const d = dayDiff(today, e.expiry); return d >= 0 && d <= data.settings.stockWarn; };
+const isSemiSoon = (e, today) => { if (e.kind !== 'semi' || e.expiry === NO_EXPIRY) return false; const d = dayDiff(today, e.expiry); return d >= 0 && d <= SOON_DAYS; };
 let batchMode = 'all';
 // 彙整成標籤：groups（groupLots 結果）→ Map(產品 → { product, unit, stock, semi, total, exps: [標籤] })，只算有剩的
 //   現貨：每個「批號＋有效日期」一個標籤（kind 'stock'）；半成品：每個有效日期一個標籤（kind 'semi'，沒有批號，記製作日期）
@@ -459,7 +465,7 @@ function byProductExpiry(groups) {
 }
 // 標籤（顏色＝效期狀態）：現貨寫批號＋有效日期；半成品寫製作日期＋有效日期
 function expChip(e, unit, today) {
-  const s = expiryStatus(e.expiry, e.total, today), mfg = [...e.mfgs].sort(), q = `${esc(fmt(e.total))} ${esc(unit)}`;
+  const s = expiryStatus(e.expiry, e.total, today, e.kind === 'stock' ? 'stock' : ''), mfg = [...e.mfgs].sort(), q = `${esc(fmt(e.total))} ${esc(unit)}`;
   if (e.kind === 'stock') {
     if (e.expiry === NO_EXPIRY) return `<span class="pill ${s.cls} exp-chip" title="期初現貨（入口網站帶入，沒有批號與效期資料）"><span class="mono">期初現貨</span> ${q}</span>`;
     return `<span class="pill ${s.cls} exp-chip" title="${esc(`現貨｜批號 ${e.batch}｜製作（轉現貨）${mfg.join('、')}｜有效日期 ${e.expiry}｜${s.label}`)}"><span class="mono">${esc(e.batch)}</span> 現貨・效期 <span class="mono">${esc(e.expiry)}</span>・${q}</span>`;
@@ -467,23 +473,24 @@ function expChip(e, unit, today) {
   return `<span class="pill ${s.cls} exp-chip" title="${esc(`半成品（轉現貨後才有批號）｜製作 ${mfg.join('、')}｜有效日期 ${e.expiry}｜${s.label}`)}"><span class="mono">製 ${esc(md(mfg[0]))}</span> 半成品・效期 <span class="mono">${esc(e.expiry)}</span>・${q}</span>`;
 }
 function renderBatches(groups, today) {
-  const split = !isStockModeDay(today), byP = byProductExpiry(groups);
-  // 篩選：全部｜15 天內到期（0～15 天，不含已過期）｜已過期；篩選時每列只顯示符合的有效日期
-  const inRange = (e, m) => m === 'soon' ? isSoon(e, today) : isGone(e, today);
+  const byP = byProductExpiry(groups), sw = data.settings.stockWarn;
+  // 篩選：全部｜現貨到期（剩現貨提醒天數以內）｜半成品到期（15 天內）｜已過期；篩選時每列只顯示符合的有效日期
+  const inRange = (e, m) => m === 'stockSoon' ? isStockSoon(e, today) : m === 'semiSoon' ? isSemiSoon(e, today) : isGone(e, today);
   const inMode = e => batchMode === 'all' || inRange(e, batchMode);
-  // 按鈕上的紅色數字：幾項產品（品號）有 15 天內到期／已過期的庫存
-  for (const [m, id, lab] of [['soon', 'batchSoonN', `項產品 ${SOON_DAYS} 天內即將到期`], ['expired', 'batchExpN', '項產品已過期']]) {
+  const MODES = { stockSoon: [`現貨到期（剩 ${sw} 天內）`, 'batchStockN'], semiSoon: [`半成品到期（${SOON_DAYS} 天內）`, 'batchSemiN'], expired: ['已過期', 'batchExpN'] };
+  // 按鈕上的紅色數字：幾項產品（品號）有現貨到期／半成品到期／已過期的庫存
+  for (const [m, [lab, id]] of Object.entries(MODES)) {
     const n = [...byP.values()].filter(p => p.exps.some(e => inRange(e, m))).length, el = $(id);
-    el.hidden = !n; el.textContent = n; el.parentElement.title = n ? `${n} ${lab}` : `沒有${lab.replace('項產品 ', '').replace('項產品', '')}的產品`;
+    el.hidden = !n; el.textContent = n; el.parentElement.title = n ? `${n} 項產品${lab}` : `沒有${lab}的產品`;
   }
-  const list = [...byP.values()].map(p => { const all = p.exps, exps = all.filter(inMode), first = all.find(e => e.expiry !== NO_EXPIRY) || all[0]; return { ...p, exps, match: clampQty(exps.reduce((s, e) => s + e.total, 0)), first: first ? first.expiry : '', expText: all.map(e => `${e.expiry} ${e.batch}`).join(' ') }; });
+  const list = [...byP.values()].map(p => { const all = p.exps, exps = all.filter(inMode); return { ...p, exps, match: clampQty(exps.reduce((s, e) => s + e.total, 0)), expText: all.map(e => `${e.expiry} ${e.batch}`).join(' ') }; });
   const base = batchMode !== 'all' ? list.filter(p => p.exps.length) : $('batchLive').checked ? list.filter(p => p.total > 0) : list;
   const rows = searchable(base, $('batchFilter').value, ['product', 'expText']).sort((a, b) => (a.total > 0 ? 0 : 1) - (b.total > 0 ? 0 : 1) || productOrder(a.product, b.product));
-  const nExp = list.reduce((s, p) => s + p.exps.length, 0), modeName = batchMode === 'soon' ? `${SOON_DAYS} 天內到期` : '已過期';
+  const nExp = list.reduce((s, p) => s + p.exps.length, 0), modeName = (MODES[batchMode] || [''])[0];
   document.querySelectorAll('#batchSeg [data-bmode]').forEach(b => b.classList.toggle('on', b.dataset.bmode === batchMode));
-  $('batchCount').textContent = batchMode === 'all' ? `目前有庫存的產品 ${list.filter(p => p.total > 0).length} 項、共 ${nExp} 個批次（現貨寫批號與有效日期，半成品寫製作日期與有效日期）；依品號 ${SORT_PREFIXES.join('、')} 排列` : `${modeName}：${base.length} 項產品、${nExp} 個批次，共 ${fmt(clampQty(base.reduce((s, p) => s + p.match, 0)))} 個；只顯示「${modeName}」的有效日期`;
-  const filtered = batchMode !== 'all';
-  $('batchTable').innerHTML = table(['產品', filtered ? `${modeName}的有效日期與數量` : '各批次（現貨：批號＋有效日期；半成品：製作日期＋有效日期；由早到晚，顏色＝效期狀態）', ...(filtered ? [`${modeName}數量#`] : []), '剩餘庫存#', ...(split ? ['現貨#', '半成品#'] : []), '最早效期狀態'], rows.map(p => { const s = p.total > 0 ? expiryStatus(p.first || NO_EXPIRY, p.total, today) : { label: '已用完', cls: 'other' }; return `<tr>${td(`<strong>${esc(p.product)}</strong>`)}<td class="exp-cell"><div class="exp-chips">${p.exps.map(e => expChip(e, p.unit, today)).join('') || '<span class="who">—</span>'}</div></td>${filtered ? `<td class="num">${fmt(p.match)} ${esc(p.unit)}</td>` : ''}<td class="num">${fmt(p.total)} ${esc(p.unit)}</td>${split ? `<td class="num">${p.stock ? fmt(p.stock) : '—'}</td><td class="num">${p.semi ? fmt(p.semi) : '—'}</td>` : ''}${td(badge(s.label, s.cls))}</tr>`; }), batchMode === 'soon' ? `目前沒有 ${SOON_DAYS} 天內到期的庫存` : batchMode === 'expired' ? '目前沒有已過期的庫存' : '尚無批次庫存紀錄');
+  $('batchCount').textContent = batchMode === 'all' ? `目前有庫存的產品 ${list.filter(p => p.total > 0).length} 項、共 ${nExp} 個批次；現貨有效日期＝轉現貨日＋${stockDaysOf()} 天，半成品＝製作日期＋保存天數；依品號 ${SORT_PREFIXES.join('、')} 排列` : `${modeName}：${base.length} 項產品、${nExp} 個批次，共 ${fmt(clampQty(base.reduce((s, p) => s + p.match, 0)))} 個`;
+  const cell = (list, u) => `<td class="exp-cell">${list.length ? `<div class="exp-chips">${list.map(e => expChip(e, u, today)).join('')}</div>` : '<span class="who">—</span>'}</td>`;
+  $('batchTable').innerHTML = table(['產品', `現貨（批號・有效日期；可放 ${stockDaysOf()} 天）`, '半成品（製作日期・有效日期）', '現貨#', '半成品#', '剩餘庫存#'], rows.map(p => `<tr>${td(`<strong>${esc(p.product)}</strong>`)}${cell(p.exps.filter(e => e.kind === 'stock'), p.unit)}${cell(p.exps.filter(e => e.kind === 'semi'), p.unit)}<td class="num">${p.stock ? fmt(p.stock) : '—'}</td><td class="num">${p.semi ? fmt(p.semi) : '—'}</td><td class="num">${fmt(p.total)} ${esc(p.unit)}</td></tr>`), batchMode === 'all' ? '尚無批次庫存紀錄' : `目前沒有${modeName}的庫存`);
 }
 function allocationRows(ledger) { const rows = []; for (const sh of [...data.movements.filter(x => x.type === 'shipment')].sort((a, b) => cmp(b.date, a.date) || productOrder(a.product, b.product) || b.seq - a.seq)) { const r = ledger.shipments.get(sh.id); if (!r) continue; for (const a of r.allocations) rows.push({ date: sh.date, orderNo: sh.orderNo || '', product: sh.product, batch: a.batch, pool: poolLabel(a.pool, sh.date), manufactureDate: a.manufactureDate, expiryDate: a.expiryDate, quantity: a.quantity, unit: getUnit(sh.product), kind: 'allocated' }); if (r.shortage) rows.push({ date: sh.date, orderNo: sh.orderNo || '', product: sh.product, batch: '未分配', manufactureDate: '', expiryDate: '', quantity: r.shortage, unit: getUnit(sh.product), kind: 'shortage' }); } return rows; }
 // 出貨扣批明細：一次看一天（預設最近一天有出貨的日子），每個品號一列，列出那天扣了哪些批號／製作日期（現貨／半成品）
@@ -519,7 +526,7 @@ function renderProducts(products) {
   $('productTable').innerHTML = table(['產品名稱', '單位', '期初入庫#', '累計生產#', '累計扣貨#', split ? '可用庫存#' : '可用庫存（現貨）#', ...(split ? ['現貨#', '半成品#'] : []), '已過期量#', '近效期量#', '最近有效日期', '安全庫存狀態'], rows.map(x => { const st = x.lowStock && x.usable < x.lowStock ? badge(`低於 ${fmt(x.lowStock)}`, 'bad') : x.lowStock ? badge('正常', 'ok') : badge('未設定', 'other'); return `<tr>${td(`<strong>${esc(x.name)}</strong>`)}${td(esc(x.unit))}<td class="num">${fmt(x.opened)}</td><td class="num">${fmt(x.produced)}</td><td class="num">${fmt(x.used)}</td><td class="num">${fmt(x.usable)}</td>${split ? `<td class="num">${fmt(x.stock)}</td><td class="num">${fmt(x.semi)}</td>` : ''}<td class="num">${fmt(x.expired)}</td><td class="num">${fmt(x.warning)}</td>${tdm(x.oldest)}${td(st)}</tr>`; }), '尚無產品，請先建立期初庫存或生產紀錄');
 }
 function renderSettings() {
-  for (const [id, v] of [['warnDays', data.settings.warnDays], ['defaultShelf', data.settings.defaultShelf]]) { const el = $(id); if (document.activeElement !== el) el.value = v; }
+  for (const [id, v] of [['warnDays', data.settings.warnDays], ['defaultShelf', data.settings.defaultShelf], ['stockDays', data.settings.stockDays], ['stockWarn', data.settings.stockWarn]]) { const el = $(id); if (document.activeElement !== el) el.value = v; }
   { const r = sellRule(); $('sellRuleText').textContent = `蛋糕類 ${r.cake.days} 天、第 ${r.cake.warnFrom} 天起提醒；生巧克力（CL 開頭）${r.choc.days} 天、第 ${r.choc.warnFrom} 天起提醒。只用在門市，入貨那天算第 1 天；總公司照半成品、現貨的有效日期。`; }
   const rows = searchable(byProductName(data.products), $('settingFilter').value, ['name']);
   $('productSettingsTable').innerHTML = table(['產品', '單位', '保存天數#', '低庫存警戒量#', ...(can('setting') ? ['操作'] : [])], rows.map(p => `<tr>${td(`<strong>${esc(p.name)}</strong>`)}${td(esc(p.unit))}<td class="num">${fmt(p.shelfDays)} 天</td><td class="num">${p.lowStock ? fmt(p.lowStock) : '—'}</td>${can('setting') ? td(`<button type="button" class="btn small" data-action="edit-product" data-id="${esc(p.id)}">修改設定</button>`) : ''}</tr>`), '新增期初庫存或生產資料後，產品會自動顯示在這裡');
@@ -679,7 +686,7 @@ function adjFormSync(fillExpiry) {
   $('adMfgWrap').hidden = $('adExpWrap').hidden = dir !== 'add'; $('adFromWrap').hidden = dir !== 'sub';
   if (dir === 'add') {
     if (!$('adMfg').value && isDate(date)) $('adMfg').value = date;
-    if (fillExpiry && p && isDate($('adMfg').value)) $('adExp').value = addDays($('adMfg').value, p.shelfDays);
+    if (fillExpiry && p && isDate($('adMfg').value)) $('adExp').value = addDays($('adMfg').value, $('adPool').value === 'stock' ? stockDaysOf() : p.shelfDays);
   }
   if (dir === 'sub') {
     const cur = $('adFrom').value, lots = p && isDate(date) ? lotsLeftOf(p.name, date, pool) : [];
@@ -1191,7 +1198,7 @@ function renderBatchRule(today) {
   if (!name || !p || !isDate(date)) box.innerHTML = `<div class="empty">${name && !p ? '找不到這個產品，請從清單選擇（可輸入品號或品名）' : '選產品和生產日期，就會產生批號與有效日期'}</div>`;
   else {
     const b = makeBatch(p.name, date), pc = productBatchCode(p.name), [y, m, d] = date.split('-').map(Number), exp = addDays(date, p.shelfDays);
-    box.innerHTML = b ? `<div class="br-code mono">${esc(b)}</div><div class="br-parts"><span><b class="mono">${esc(pc.slice(0, 2))}</b>品號碼（1-2 碼）</span><span><b class="mono">${esc(monthCode(m))}</b>${m} 月（第 3 碼）</span><span><b class="mono">${esc(yearCode(y))}</b>${y} 年（第 4 碼）</span><span><b class="mono">${esc(dayCode(d))}</b>${d} 日（第 5-6 碼）</span><span><b class="mono">${esc(pc.slice(2))}</b>品號碼（7-8 碼）</span></div><p class="br-exp">有效日期：<strong>${esc(exp)}</strong>（${esc(date)} ＋ 保存 ${fmt(p.shelfDays)} 天）</p>`
+    box.innerHTML = b ? `<div class="br-code mono">${esc(b)}</div><div class="br-parts"><span><b class="mono">${esc(pc.slice(0, 2))}</b>品號碼（1-2 碼）</span><span><b class="mono">${esc(monthCode(m))}</b>${m} 月（第 3 碼）</span><span><b class="mono">${esc(yearCode(y))}</b>${y} 年（第 4 碼）</span><span><b class="mono">${esc(dayCode(d))}</b>${d} 日（第 5-6 碼）</span><span><b class="mono">${esc(pc.slice(2))}</b>品號碼（7-8 碼）</span></div><p class="br-exp">半成品有效日期：<strong>${esc(exp)}</strong>（${esc(date)} ＋ 保存 ${fmt(p.shelfDays)} 天）｜當天轉現貨的話，現貨有效日期：<strong>${esc(addDays(date, stockDaysOf()))}</strong>（＋${stockDaysOf()} 天）</p>`
       : `<div class="notice warning">${!pc ? `「${esc(p.name)}」的品號沒辦法自動變成 4 碼品號碼，請在下方「品號碼對照」設定。` : `${y} 年沒有年碼（規則只到 ${YEAR_BASE}～${YEAR_BASE + YEAR_CODES.length - 1} 年），請更新批號規則。`}</div>`;
   }
   // 2. 某一天的生產批號
@@ -1326,7 +1333,7 @@ function applyPortalPending() {
             if (!signed) return;
             const p = productFor(r.code, r.name), id = `pt-j${suffix}-${ds}-${r.code}`, old = existing.get(id), dir = signed > 0 ? 'add' : 'sub', q = clampQty(Math.abs(signed)), mfg = phase === 'open' ? addDays(ds, -1) : ds;
             want.add(id); sum.jN++; if (phase === 'open') sum.gN++;
-            const body = { type: 'adjust', dir, date: ds, product: p.name, quantity: q, note: `入口網站：${label}`, phase, ...(pool === 'stock' ? { pool: 'stock' } : {}), ...(dir === 'add' ? { batch: '—', manufactureDate: mfg, expiryDate: addDays(mfg, p.shelfDays) } : { fromMfg: '', fromExp: '' }) };
+            const body = { type: 'adjust', dir, date: ds, product: p.name, quantity: q, note: `入口網站：${label}`, phase, ...(pool === 'stock' ? { pool: 'stock' } : {}), ...(dir === 'add' ? { batch: '—', manufactureDate: mfg, expiryDate: addDays(mfg, pool === 'stock' ? stockDaysOf() : p.shelfDays) } : { fromMfg: '', fromExp: '' }) };
             const rec = old ? { ...old, ...body } : { id, seq: nextSeq(), ...body, by: who, at };
             if (!old || old.quantity !== rec.quantity || old.dir !== rec.dir || old.product !== rec.product || (old.pool || '') !== (rec.pool || '') || old.note !== rec.note || old.phase !== rec.phase || old.manufactureDate !== rec.manufactureDate || old.expiryDate !== rec.expiryDate) saves.push(rec);
           };
@@ -1362,7 +1369,7 @@ function applyPortalPending() {
         }
         if (c.hasStock && okP && r.toStock > 0) {
           // 生產轉現貨：當天生產直接做成現貨，製作日＝當天，有效日期＝當天＋保存天數
-          const p = productFor(r.code, r.name), id = `pt-q-${ds}-${r.code}`, old = existing.get(id), exp = addDays(ds, p.shelfDays);
+          const p = productFor(r.code, r.name), id = `pt-q-${ds}-${r.code}`, old = existing.get(id), exp = addDays(ds, stockDaysOf());
           want.add(id); sum.qN++; sum.qQ += r.toStock;
           const rec = old ? { ...old, product: p.name, quantity: r.toStock, batch: batchFor(p.name, ds), expiryDate: old.editBy ? old.expiryDate : exp } : { id, type: 'production', pool: 'stock', seq: nextSeq(), date: ds, product: p.name, batch: batchFor(p.name, ds), manufactureDate: ds, expiryDate: exp, quantity: r.toStock, note: '入口網站：生產轉現貨', by: who, at };
           if (!old || old.quantity !== rec.quantity || old.product !== rec.product || old.batch !== rec.batch || old.expiryDate !== rec.expiryDate) saves.push(rec);
@@ -1564,7 +1571,7 @@ function bind() {
     for (const f of ['shopFilter-', 'shopRecFilter-']) $(f + id).addEventListener('input', scheduleRender);
     $('shopSeg-' + id).addEventListener('click', e => { const b = e.target.closest('[data-smode]'); if (!b) return; shopMode[id] = b.dataset.smode; scheduleRender(); });
   }
-  $('settingsForm').addEventListener('submit', e => { e.preventDefault(); if (!can('setting')) return; const w = Number($('warnDays').value), s = Number($('defaultShelf').value); if (!Number.isInteger(w) || w < 1 || w > 3650 || !Number.isInteger(s) || s < 0 || s > 36500) { toast('請填寫有效的預警及保存天數（整數）', true); return; } act(() => { FEStore.save('settings', { id: 'main', warnDays: w, defaultShelf: s }); toast('系統設定已儲存'); }); });
+  $('settingsForm').addEventListener('submit', e => { e.preventDefault(); if (!can('setting')) return; const w = Number($('warnDays').value), s = Number($('defaultShelf').value), k = Number($('stockDays').value), kw = Number($('stockWarn').value); if (!Number.isInteger(w) || w < 1 || w > 3650 || !Number.isInteger(s) || s < 0 || s > 36500) { toast('請填寫有效的預警及保存天數（整數）', true); return; } if (!Number.isInteger(k) || k < 1 || k > 365 || !Number.isInteger(kw) || kw < 0 || kw > 60) { toast('現貨可放天數要是 1～365、現貨提醒天數要是 0～60 的整數', true); return; } act(() => { FEStore.save('settings', { id: 'main', warnDays: w, defaultShelf: s, stockDays: k, stockWarn: kw }); toast(`系統設定已儲存：現貨可放 ${k} 天、剩 ${kw} 天內提醒`); }); });
   for (const id of ['oMfg', 'oShelf']) $(id).addEventListener('change', () => autoExpiry('o')); $('oProduct').addEventListener('change', () => productDefaults('o'));
   const bm = $('portalBm'); bm.setAttribute('href', portalBookmarklet());
   bm.addEventListener('click', e => { e.preventDefault(); toast('請把這顆按鈕「拖曳」到瀏覽器的書籤列，再到入口網站的頁面按書籤。'); });
