@@ -1088,6 +1088,9 @@ function hqCandidates(product, date) {
   const out = [...set].sort(); candMemo.out.set(key, out); return out;
 }
 function rcvDay(sid) { if (isDate(rcvDate[sid])) return rcvDate[sid]; const t = TODAY(), ds = [...new Set(data.shops.filter(r => r.shop === sid && r.type === 'in' && r.date <= t).map(r => r.date))].sort(); return ds.length ? ds[ds.length - 1] : t; }
+// 待確認品項：每個可能的批號一格數量（先填推定的），門市照盒子上的批號改數量，合計要等於入貨數量，再按「確認」
+// rcvDraft：還沒按確認前改的數量（畫面重新整理時保留）
+const rcvDraft = {};
 function renderReceive(sid, plan) {
   const day = rcvDay(sid), di = $('rcvDate-' + sid); if (document.activeElement !== di) di.value = day;
   const recs = data.shops.filter(r => r.shop === sid && r.type === 'in' && r.date === day).sort((a, b) => productOrder(a.product, b.product)), edit = can(shopPerm(sid));
@@ -1095,33 +1098,44 @@ function renderReceive(sid, plan) {
   let done = 0, auto = 0, wait = 0;
   const rows = recs.map(r => {
     const parts = plan.get(r.id) || [], conf = parts.filter(p => p.confirmed), guess = parts.filter(p => !p.confirmed && !p.unknown), unk = parts.filter(p => p.unknown);
-    const cq = sumQ(conf, p => p.qty), allAuto = conf.length && conf.every(p => p.auto), manual = shopConfirmedQ(r) > 0, cands = hqCandidates(r.product, shopFrom(r));
+    const cq = sumQ(conf, p => p.qty), allAuto = conf.length && conf.every(p => p.auto), manual = shopConfirmedQ(r) > 0, pending = cq < r.quantity - 1e-7 && (guess.length || unk.length);
     let st;
-    if (cq >= r.quantity - 1e-7) { st = allAuto ? badge('自動確認（今天只出一個批號）', 'ok') : badge('已確認', 'ok'); if (allAuto) auto++; else done++; }
-    else if (unk.length && !guess.length) st = badge('批號不明', 'due');
+    if (!pending) { st = allAuto ? badge('自動確認（今天只出一個批號）', 'ok') : badge('已確認', 'ok'); if (allAuto) auto++; else done++; }
     else { st = cq > 0 ? badge(`已確認 ${fmt(cq)}／${fmt(r.quantity)}`, 'due') : badge('待確認', 'bad'); wait++; }
     const chips = [...conf.map(p => `<span class="pill ok exp-chip"><span class="mono">${esc(p.batch)}</span> ×${fmt(p.qty)}${p.auto ? ' <span class="guess">自動</span>' : ''}</span>`), ...guess.map(p => `<span class="pill other exp-chip"><span class="mono">${esc(guessLabel(p))}</span> ×${fmt(p.qty)} <span class="guess">推定</span></span>`), ...unk.map(p => `<span class="pill due exp-chip">批號不明 ×${fmt(p.qty)}</span>`)].join('');
-    const shippedB = (shipPools.get(shopFrom(r) + '|' + r.product) || []).map(p => p.batch).filter(Boolean), alt = [...new Set([...shippedB, ...cands])].sort();
-    const others = guess.length ? alt.filter(b => !(guess.length === 1 && guess[0].batch === b)) : [];
-    const ops = !edit ? '' : [
-      guess.length ? `<button type="button" class="btn small primary" data-action="rcv-confirm" data-shop="${sid}" data-id="${esc(r.id)}" title="盒子上的批號跟推定的一樣，就按確認">確認</button>` : '',
-      others.length ? `<span class="who">不是的話改成：</span>${others.map(b => `<button type="button" class="btn small" data-action="rcv-pick" data-shop="${sid}" data-id="${esc(r.id)}" data-batch="${esc(b)}">${esc(b)}</button>`).join('')}` : '',
-      manual ? `<button type="button" class="btn small danger" data-action="rcv-clear" data-shop="${sid}" data-id="${esc(r.id)}">清除</button>` : ''].filter(Boolean).join('');
-    return `<tr>${td(`<strong>${esc(r.product)}</strong>`)}<td class="num">${fmt(r.quantity)}</td>${td(st)}<td class="exp-cell"><div class="exp-chips">${chips || '<span class="who">—</span>'}</div></td><td class="exp-cell"><div class="segment">${ops}</div></td></tr>`;
+    let ops = '';
+    if (edit && pending) {
+      // 可以填的批號：總公司那天出的＋那天可能出的；先填「已確認＋推定」的數量
+      const shippedB = (shipPools.get(shopFrom(r) + '|' + r.product) || []).map(p => p.batch).filter(Boolean);
+      const pre = {}; for (const p of parts) if (p.batch && !p.unknown) pre[p.batch] = clampQty((pre[p.batch] || 0) + p.qty);
+      const alt = [...new Set([...Object.keys(pre), ...shippedB, ...hqCandidates(r.product, shopFrom(r))])].sort(), dr = rcvDraft[r.id] || {};
+      const val = b => b in dr ? dr[b] : (pre[b] || 0), sum = clampQty(alt.reduce((t, b) => t + (Number(val(b)) || 0), 0));
+      ops = `<div class="rq-row">${alt.map(b => `<label class="rq"><span class="mono">${esc(b)}</span><input type="number" inputmode="numeric" min="0" max="${r.quantity}" step="1" value="${esc(val(b))}" data-rq="${esc(r.id)}" data-batch="${esc(b)}" aria-label="${esc(b)} 數量"></label>`).join('')}<span class="rq-sum${Math.abs(sum - r.quantity) > 1e-7 ? ' bad' : ''}" data-rqsum="${esc(r.id)}" data-total="${r.quantity}">合計 ${fmt(sum)}／${fmt(r.quantity)}</span><button type="button" class="btn small primary" data-action="rcv-confirm" data-shop="${sid}" data-id="${esc(r.id)}" title="照左邊填的數量確認">確認</button></div>`;
+    }
+    if (edit && manual) ops += `<button type="button" class="btn small danger" data-action="rcv-clear" data-shop="${sid}" data-id="${esc(r.id)}">清除</button>`;
+    return `<tr>${td(`<strong>${esc(r.product)}</strong>`)}<td class="num">${fmt(r.quantity)}</td>${td(st)}<td class="exp-cell"><div class="exp-chips">${chips || '<span class="who">—</span>'}</div></td><td class="exp-cell">${ops}</td></tr>`;
   });
-  $('rcvInfo-' + sid).textContent = recs.length ? `${day} 入貨 ${recs.length} 項：自動確認 ${auto} 項（總公司那天這個品項只出一個批號）、門市已確認 ${done} 項、待確認 ${wait} 項（總公司出了好幾個批號）。待確認的看盒子上的批號：跟推定的一樣就按「確認」，不一樣就點正確的批號` : `${day} 沒有入貨紀錄`;
-  $('rcvList-' + sid).innerHTML = table(['產品', '入貨#', '狀態', '批號（綠＝已確認、灰＝推定）', '確認'], rows, `${day} 沒有入貨紀錄`);
+  $('rcvInfo-' + sid).textContent = recs.length ? `${day} 入貨 ${recs.length} 項：自動確認 ${auto} 項（總公司那天這個品項只出一個批號）、門市已確認 ${done} 項、待確認 ${wait} 項（總公司出了好幾個批號）。待確認的照盒子上的批號填每個批號幾個（已先填推定的），合計對了按「確認」` : `${day} 沒有入貨紀錄`;
+  $('rcvList-' + sid).innerHTML = table(['產品', '入貨#', '狀態', '批號（綠＝已確認、灰＝推定）', '每個批號幾個 → 確認'], rows, `${day} 沒有入貨紀錄`);
 }
-// 按「確認」：推定的批號就是盒子上的，存成已確認（批號不明的部分不動）
-function rcvConfirm(sid, id) {
+// 改數量：記到 rcvDraft，更新那一列的合計
+function rcvInput(el) {
+  const id = el.dataset.rq, b = el.dataset.batch; (rcvDraft[id] = rcvDraft[id] || {})[b] = el.value === '' ? '' : Number(el.value);
+  const row = el.closest('tr'), sumEl = row && row.querySelector('[data-rqsum]'); if (!sumEl) return;
+  const sum = clampQty([...row.querySelectorAll('[data-rq]')].reduce((t, x) => t + (Number(x.value) || 0), 0)), total = Number(sumEl.dataset.total);
+  sumEl.textContent = `合計 ${fmt(sum)}／${fmt(total)}`; sumEl.classList.toggle('bad', Math.abs(sum - total) > 1e-7);
+}
+// 按「確認」：照那一列填的每個批號數量存成已確認（合計要等於入貨數量）
+function rcvConfirm(sid, id, btn) {
   if (!can(shopPerm(sid))) return;
   const r = data.shops.find(x => x.id === id && x.shop === sid); if (!r) return;
-  const parts = shopBatchPlan().get(r.id) || [], add = parts.filter(p => !p.unknown && p.batch && (!p.confirmed || p.auto));
-  if (!add.length) return;
+  const row = btn && btn.closest('tr'), inputs = row ? [...row.querySelectorAll('[data-rq]')] : [], scan = {};
+  for (const x of inputs) { const n = Number(x.value); if (x.value === '' || !Number.isFinite(n) || n < 0) { toast('數量要填 0 以上的數字', true); return; } if (n > 0) scan[x.dataset.batch] = clampQty((scan[x.dataset.batch] || 0) + n); }
+  const sum = sumQ(Object.values(scan), v => v);
+  if (Math.abs(sum - r.quantity) > 1e-7) { toast(`${r.product}：每個批號加起來要等於入貨 ${fmt(r.quantity)} 個（現在是 ${fmt(sum)} 個）`, true, 6000); return; }
   act(() => {
-    const scan = { ...shopConfirmed(r) }; for (const p of add) scan[p.batch] = clampQty((scan[p.batch] || 0) + p.qty);
-    const { batch: _b, ...rest } = r; FEStore.save('shop', { ...rest, batch: '', scan, ...stampEdit() });
-    toast(`已確認 ${r.product}：${add.map(p => `${p.batch}×${fmt(p.qty)}`).join('、')}`);
+    const { batch: _b, ...rest } = r; FEStore.save('shop', { ...rest, batch: '', scan, ...stampEdit() }); delete rcvDraft[r.id];
+    toast(`已確認 ${r.product}：${Object.entries(scan).map(([b, q]) => `${b}×${fmt(q)}`).join('、')}`);
   });
 }
 function saveScan(r, batch, n) {
@@ -1139,6 +1153,7 @@ function rcvPick(sid, id, batch) {
 function rcvClear(sid, id) {
   if (!can(shopPerm(sid))) return;
   const r = data.shops.find(x => x.id === id && x.shop === sid); if (!r) return;
+  delete rcvDraft[r.id];
   act(() => { const { scan, ...rest } = r; FEStore.save('shop', { ...rest, batch: '', ...stampEdit() }); toast(`已清除 ${r.product} 的確認，改回自動推定`); });
 }
 /* ---------- 門市批次匯入（銷售／報廢） ----------
@@ -1621,7 +1636,7 @@ async function handleAction(el) {
   if (a === 'shop-detail') return openShopDetail(el.dataset.shop, id);
   if (a === 'shop-import') return openShopImport(el.dataset.shop);
   if (a === 'rcv-pick') return rcvPick(el.dataset.shop, id, el.dataset.batch);
-  if (a === 'rcv-confirm') return rcvConfirm(el.dataset.shop, id);
+  if (a === 'rcv-confirm') return rcvConfirm(el.dataset.shop, id, el);
   if (a === 'rcv-clear') return rcvClear(el.dataset.shop, id);
   if (a === 'shop-delete') return deleteShopRec(el.dataset.shop, id);
   if (a === 'shop-batch') return editShopBatch(el.dataset.shop, id);
@@ -1641,6 +1656,7 @@ async function handleAction(el) {
   if (a === 'reset') return resetAll();
 }
 function bind() {
+  document.addEventListener('input', e => { const el = e.target.closest && e.target.closest('[data-rq]'); if (el) rcvInput(el); });
   document.addEventListener('click', e => {
     const el = e.target.closest('[data-action]'); if (el) { e.preventDefault(); handleAction(el); return; }
     const v = e.target.closest('[data-view]'); if (v && v.tagName !== 'A') go(v.dataset.view);
