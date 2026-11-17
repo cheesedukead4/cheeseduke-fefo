@@ -548,7 +548,8 @@ function renderBanner() {
   if (st.state === 'error') b.push(`<div class="banner bad">${esc(st.detail || '無法連線到雲端')}<button class="btn small" type="button" data-action="sync">重試</button></div>`);
   else if (st.state === 'offline') b.push(`<div class="banner warn">${esc(st.detail || '目前離線')}。修改會先存在這台裝置，恢復網路後自動上傳。</div>`);
   // 上次入口網站同步用的是舊版書籤：一直提醒，直到用新版書籤同步一次
-  { const m = portalMeta(); if (window.FEAuth && FEAuth.user() && canPortal() && m.at && (Number(m.bv) || 0) < PORTAL_BM_V) b.push(`<div class="banner bad">上次入口網站同步（${new Date(m.at).toLocaleString('zh-TW', { month: 'numeric', day: 'numeric', hour: '2-digit', minute: '2-digit' })}${m.by ? '，' + esc(m.by) : ''}）用的是<strong>舊版書籤</strong>，總表的半成品增減、現貨增減、轉試吃、手動數字與隔夜差異都<strong>沒有帶入</strong>。請到「入口網站同步」頁把「同步生產與出貨」按鈕重新拖到書籤列（取代舊的），再同步一次。<a class="btn small" href="#portal" data-view="portal">前往入口網站同步</a></div>`); }
+  // 沒有書籤版本紀錄（用更新前的 App 同步的）：有帶入增減就當成新版書籤
+  { const m = portalMeta(), bv = Number(m.bv) || (Number(m.jN) > 0 ? PORTAL_BM_V : 0); if (window.FEAuth && FEAuth.user() && canPortal() && m.at && bv < PORTAL_BM_V) b.push(`<div class="banner bad">上次入口網站同步（${new Date(m.at).toLocaleString('zh-TW', { month: 'numeric', day: 'numeric', hour: '2-digit', minute: '2-digit' })}${m.by ? '，' + esc(m.by) : ''}）用的是<strong>舊版書籤</strong>，總表的半成品增減、現貨增減、轉試吃、手動數字與隔夜差異都<strong>沒有帶入</strong>。請到「入口網站同步」頁把「同步生產與出貨」按鈕重新拖到書籤列（取代舊的），再同步一次。<a class="btn small" href="#portal" data-view="portal">前往入口網站同步</a></div>`); }
   if (window.FEAuth && FEAuth.user() && !isAdmin() && !PERMS.some(p => can(p.id))) b.push('<div class="banner">你目前只能查看與下載資料。需要登錄生產、出貨或修改設定的話，請找管理員開權限。</div>');
   const html = b.join('');
   if (html !== lastBanner) { $('banner').innerHTML = html; lastBanner = html; }
