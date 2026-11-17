@@ -3,7 +3,7 @@
  * ---------------------------------------------------------------
  * 資料（FEStore，見 cloud-store.js）：
  *   products  { id, name, unit, shelfDays, lowStock }                       id = 'p-' + 名稱雜湊（兩台裝置新增同名產品會合併成同一筆）
- *   settings  { id: 'main', warnDays, defaultShelf }
+ *   settings  { id: 'main', warnDays（舊，已不用）, defaultShelf, stockDays, stockWarn, semiWarn }
  *   opening   { id, type: 'opening', seq, product, batch, manufactureDate, expiryDate, entryDate, quantity, note, by, at, editBy?, editAt? }
  *   moves     生產 { id, type: 'production', seq, date, product, batch, manufactureDate, expiryDate, quantity, note, by, at, ... }
  *             出貨 { id, type: 'shipment', seq, date, product, quantity, orderNo, note, by, at, ... }
@@ -68,7 +68,7 @@ const expShow = d => d === NO_EXPIRY ? '—' : d;
 // 不需要管理的產品：品名含這些字的（例如「CK-08|YA-23 6朱|擺盤」）不同步、不顯示，所有表格與計算都當作不存在
 const EXCLUDE_WORDS = ['擺盤'];
 const isExcluded = name => EXCLUDE_WORDS.some(w => String(name || '').includes(w));
-const blankState = () => ({ version: 1, products: [], opening: [], movements: [], shops: [], settings: { warnDays: 30, defaultShelf: 30, stockDays: 12, stockWarn: 3 } });
+const blankState = () => ({ version: 1, products: [], opening: [], movements: [], shops: [], settings: { warnDays: 30, defaultShelf: 30, stockDays: 12, stockWarn: 3, semiWarn: 15 } });
 
 /* ---------- 狀態 ---------- */
 let data = blankState();
@@ -89,9 +89,9 @@ function normProduct(p) {
   return { id: clean(p.id) || productId(p.name), name: clean(p.name), unit: clean(p.unit) || '個', shelfDays: Number.isInteger(sd) && sd >= 0 ? sd : 30, lowStock: low > 0 ? low : 0 };
 }
 function normSettings(s) {
-  const w = Number(s?.warnDays), d = Number(s?.defaultShelf), k = Number(s?.stockDays), kw = Number(s?.stockWarn);
-  // stockDays：總公司現貨可放幾天（有效日期＝轉現貨日＋幾天）；stockWarn：現貨剩幾天以內算「現貨到期」
-  return { warnDays: Number.isInteger(w) && w > 0 ? w : 30, defaultShelf: Number.isInteger(d) && d >= 0 ? d : 30, stockDays: Number.isInteger(k) && k >= 1 && k <= 365 ? k : 12, stockWarn: Number.isInteger(kw) && kw >= 0 && kw <= 60 ? kw : 3 };
+  const w = Number(s?.warnDays), d = Number(s?.defaultShelf), k = Number(s?.stockDays), kw = Number(s?.stockWarn), mw = Number(s?.semiWarn);
+  // stockDays：總公司現貨可放幾天（有效日期＝轉現貨日＋幾天）；stockWarn：現貨剩幾天以內算「現貨到期」；semiWarn：半成品剩幾天以內警示（15 天）
+  return { warnDays: Number.isInteger(w) && w > 0 ? w : 30, defaultShelf: Number.isInteger(d) && d >= 0 ? d : 30, stockDays: Number.isInteger(k) && k >= 1 && k <= 365 ? k : 12, stockWarn: Number.isInteger(kw) && kw >= 0 && kw <= 60 ? kw : 3, semiWarn: Number.isInteger(mw) && mw >= 1 && mw <= 365 ? mw : 15 };
 }
 function sanitizeRec(r) {
   if (!r || typeof r !== 'object' || !r.id) return null;
@@ -151,7 +151,7 @@ function replaceAll(st) {
   const uniq = (arr, key) => { const seen = new Set(); return arr.filter(x => !seen.has(key(x)) && seen.add(key(x))); };
   FEStore.replaceKinds({
     products: uniq(st.products, p => p.name).map(p => ({ id: productId(p.name), name: p.name, unit: p.unit, shelfDays: p.shelfDays, lowStock: p.lowStock })),
-    settings: [{ id: 'main', warnDays: st.settings.warnDays, defaultShelf: st.settings.defaultShelf, stockDays: st.settings.stockDays, stockWarn: st.settings.stockWarn }],
+    settings: [{ id: 'main', warnDays: st.settings.warnDays, defaultShelf: st.settings.defaultShelf, stockDays: st.settings.stockDays, stockWarn: st.settings.stockWarn, semiWarn: st.settings.semiWarn }],
     opening: uniq(st.opening, r => r.id).map(r => strip({ ...r, type: 'opening' })),
     moves: uniq(st.movements, r => r.id).map(strip),
     ...(Array.isArray(st.shops) ? { shop: uniq(st.shops, r => r.id).map(strip) } : {}), // 舊備份沒有門市資料時不動門市
@@ -296,10 +296,10 @@ const byProductName = list => [...list].sort((a, b) => productOrder(a.name, b.na
 const poolLabel = (pool, date = TODAY()) => isStockModeDay(date) || pool === 'stock' ? '現貨' : '半成品';
 function productSummary(ledger, asOf = TODAY()) {
   const by = new Map(); for (const l of ledger.lots) { if (!by.has(l.product)) by.set(l.product, []); by.get(l.product).push(l); }
-  return data.products.map(p => { const lots = by.get(p.name) || []; const usable = clampQty(lots.filter(x => x.expiryDate >= asOf).reduce((s, x) => s + x.remaining, 0)); const stock = clampQty(lots.filter(x => x.pool === 'stock' && x.expiryDate >= asOf).reduce((s, x) => s + x.remaining, 0)), semi = clampQty(usable - stock); const expired = clampQty(lots.filter(x => x.expiryDate < asOf).reduce((s, x) => s + x.remaining, 0)); const warning = clampQty(lots.filter(x => x.expiryDate >= asOf && dayDiff(asOf, x.expiryDate) <= data.settings.warnDays).reduce((s, x) => s + x.remaining, 0)); const oldest = lots.filter(x => x.remaining > 0 && x.expiryDate >= asOf && x.expiryDate !== NO_EXPIRY).sort((a, b) => cmp(a.expiryDate, b.expiryDate))[0]?.expiryDate || ''; const produced = clampQty(lots.filter(x => x.source === 'production').reduce((s, x) => s + x.quantity, 0)); const opened = clampQty(lots.filter(x => x.source === 'opening').reduce((s, x) => s + x.quantity, 0)); const used = clampQty(lots.reduce((s, x) => s + x.shipped, 0)); return { ...p, usable, stock, semi, expired, warning, oldest, produced, opened, used }; }).sort((a, b) => productOrder(a.name, b.name));
+  return data.products.map(p => { const lots = by.get(p.name) || []; const usable = clampQty(lots.filter(x => x.expiryDate >= asOf).reduce((s, x) => s + x.remaining, 0)); const stock = clampQty(lots.filter(x => x.pool === 'stock' && x.expiryDate >= asOf).reduce((s, x) => s + x.remaining, 0)), semi = clampQty(usable - stock); const expired = clampQty(lots.filter(x => x.expiryDate < asOf).reduce((s, x) => s + x.remaining, 0)); const warning = clampQty(lots.filter(x => x.expiryDate >= asOf && x.expiryDate !== NO_EXPIRY && dayDiff(asOf, x.expiryDate) <= (x.pool === 'stock' ? data.settings.stockWarn : data.settings.semiWarn)).reduce((s, x) => s + x.remaining, 0)); const oldest = lots.filter(x => x.remaining > 0 && x.expiryDate >= asOf && x.expiryDate !== NO_EXPIRY).sort((a, b) => cmp(a.expiryDate, b.expiryDate))[0]?.expiryDate || ''; const produced = clampQty(lots.filter(x => x.source === 'production').reduce((s, x) => s + x.quantity, 0)); const opened = clampQty(lots.filter(x => x.source === 'opening').reduce((s, x) => s + x.quantity, 0)); const used = clampQty(lots.reduce((s, x) => s + x.shipped, 0)); return { ...p, usable, stock, semi, expired, warning, oldest, produced, opened, used }; }).sort((a, b) => productOrder(a.name, b.name));
 }
 // pool 'stock'：現貨剩「現貨提醒天數」以內是紅色；半成品照原本（7 天內紅、預警天數內黃）
-function expiryStatus(expiry, qty, date = TODAY(), pool = '') { if (qty <= 0) return { label: '已用完', cls: 'other' }; if (expiry === NO_EXPIRY) return { label: '現貨', cls: 'future' }; const days = dayDiff(date, expiry); if (days < 0) return { label: '已過期', cls: 'expired' }; if (pool === 'stock') return days <= data.settings.stockWarn ? { label: days === 0 ? '今日到期' : `剩 ${days} 天`, cls: 'critical' } : { label: `剩 ${days} 天`, cls: 'ok' }; if (days <= 7) return { label: days === 0 ? '今日到期' : `剩 ${days} 天`, cls: 'critical' }; if (days <= data.settings.warnDays) return { label: `剩 ${days} 天`, cls: 'due' }; return { label: '正常', cls: 'ok' }; }
+function expiryStatus(expiry, qty, date = TODAY(), pool = '') { if (qty <= 0) return { label: '已用完', cls: 'other' }; if (expiry === NO_EXPIRY) return { label: '現貨', cls: 'future' }; const days = dayDiff(date, expiry); if (days < 0) return { label: '已過期', cls: 'expired' }; if (pool === 'stock') return days <= data.settings.stockWarn ? { label: days === 0 ? '今日到期' : `剩 ${days} 天`, cls: 'critical' } : { label: `剩 ${days} 天`, cls: 'ok' }; if (days <= 7) return { label: days === 0 ? '今日到期' : `剩 ${days} 天`, cls: 'critical' }; if (days <= data.settings.semiWarn) return { label: `剩 ${days} 天（半成品警示）`, cls: 'due' }; return { label: '正常', cls: 'ok' }; }
 
 /* ---------- 表格與畫面 ---------- */
 const badge = (label, cls) => `<span class="pill ${cls}">${esc(label)}</span>`;
@@ -349,7 +349,7 @@ function renderDashboard(today, current, groups, prod) {
   // 效期預警：現貨剩「現貨提醒天數」以內、半成品 15 天內（期初現貨沒有效期不算）
   const isStk = x => x.pool === 'stock' || (x.batch && x.batch !== '—');
   const dueStock = live.filter(x => isStk(x) && x.expiryDate !== NO_EXPIRY && dayDiff(today, x.expiryDate) >= 0 && dayDiff(today, x.expiryDate) <= data.settings.stockWarn).length;
-  const dueSemi = live.filter(x => !isStk(x) && dayDiff(today, x.expiryDate) >= 0 && dayDiff(today, x.expiryDate) <= SOON_DAYS).length, due = dueStock + dueSemi;
+  const dueSemi = live.filter(x => !isStk(x) && dayDiff(today, x.expiryDate) >= 0 && dayDiff(today, x.expiryDate) <= semiWarnDays()).length, due = dueStock + dueSemi;
   const expired = live.filter(x => x.expiryDate < today).length;
   $('summaryCards').innerHTML = `<article class="kpi"><div class="kpi-label">今日生產量</div><div class="kpi-value">${unitsLabel(todayProductions)}</div><div class="kpi-desc">已登錄 ${todayProductions.length} 筆生產</div></article><article class="kpi"><div class="kpi-label">今日實際出貨量</div><div class="kpi-value">${unitsLabel(todayShip)}</div><div class="kpi-desc">已登錄 ${todayShip.length} 筆出貨需求</div></article><article class="kpi"><div class="kpi-label">目前有庫存產品</div><div class="kpi-value">${usableProducts}<span class="kpi-unit">種</span></div><div class="kpi-desc">所有庫存以產品個別單位計算</div></article><article class="kpi ${expired ? 'bad' : due ? 'warn' : ''}"><div class="kpi-label">效期預警批次</div><div class="kpi-value">${due}<span class="kpi-unit">批</span></div><div class="kpi-desc">現貨到期 ${dueStock}｜半成品到期 ${dueSemi}｜已過期 ${expired} 批</div></article>`;
   const shortCount = [...current.shipments.values()].filter(x => x.shortage > 0).length;
@@ -362,7 +362,7 @@ function renderDashboard(today, current, groups, prod) {
   // 庫存效期預警：分「現貨到期」（剩現貨提醒天數以內）與「半成品到期」（15 天內），已過期的也列；每個品號一列
   const warnRows = [...byProductExpiry(groups).values()].map(p => ({ ...p, sx: p.exps.filter(e => e.kind === 'stock' && (isStockSoon(e, today) || isGone(e, today))), mx: p.exps.filter(e => e.kind === 'semi' && (isSemiSoon(e, today) || isGone(e, today))) })).filter(p => p.sx.length || p.mx.length).sort((a, b) => productOrder(a.product, b.product));
   const chips = (list, u) => list.length ? `<div class="exp-chips">${list.map(e => expChip(e, u, today)).join('')}</div>` : '<span class="who">—</span>';
-  $('dashExpiry').innerHTML = table(['產品', `現貨到期（剩 ${data.settings.stockWarn} 天內）與已過期`, `半成品到期（${SOON_DAYS} 天內）與已過期`, '剩餘庫存#'], warnRows.map(p => `<tr>${td(`<strong>${esc(p.product)}</strong>`)}<td class="exp-cell">${chips(p.sx, p.unit)}</td><td class="exp-cell">${chips(p.mx, p.unit)}</td><td class="num">${fmt(p.total)} ${esc(p.unit)}</td></tr>`), '目前沒有快到期或已過期的現貨、半成品');
+  $('dashExpiry').innerHTML = table(['產品', `現貨到期（剩 ${data.settings.stockWarn} 天內）與已過期`, `半成品到期（${semiWarnDays()} 天內）與已過期`, '剩餘庫存#'], warnRows.map(p => `<tr>${td(`<strong>${esc(p.product)}</strong>`)}<td class="exp-cell">${chips(p.sx, p.unit)}</td><td class="exp-cell">${chips(p.mx, p.unit)}</td><td class="num">${fmt(p.total)} ${esc(p.unit)}</td></tr>`), '目前沒有快到期或已過期的現貨、半成品');
   // 近期出貨：最近 7 天，每個品號一列，各日期的出貨量列在同一列（有缺口的標紅）
   const since = addDays(today, -6), recent = data.movements.filter(x => x.type === 'shipment' && x.date <= today && x.date >= since);
   $('dashShipments').innerHTML = table(['產品', '最近 7 天出貨（日期新到舊）', '需求量#', '實際出貨#', '缺口#'], groupByProduct(recent, '', []).map(g => { const t = shipTotals(g.recs, current); return `<tr>${td(`<strong>${esc(g.product)}</strong>`)}${chipCell(g.recs, r => shipChip(r, current), 'shipment', g.product)}<td class="num">${fmt(t.req)} ${esc(getUnit(g.product))}</td><td class="num">${fmt(t.shipped)}</td><td class="num">${t.short ? badge(fmt(t.short), 'bad') : '—'}</td></tr>`; }), '最近 7 天沒有出貨紀錄');
@@ -440,11 +440,12 @@ async function openDetail(kind, product) {
 const closeModal = () => { if (!$('modal').hidden) $('modalCancel').click(); };
 // 每個產品一列：同一個有效日期合在一起，不同有效日期分開列（顏色＝效期狀態）；逐批號的明細用「匯出 CSV」
 // 排列照 productOrder（品號開頭 CK、CC、CA、CS、CL）
-const SOON_DAYS = 15;
+// 半成品警示天數（現階段 15 天，「資料與設定」可改）
+const semiWarnDays = () => data.settings.semiWarn || 15;
 // 現貨到期：現貨剩「現貨提醒天數」以內（不含已過期）；半成品到期：半成品 15 天內（不含已過期）；已過期：兩種都算
 const isGone = (e, today) => e.expiry !== NO_EXPIRY && dayDiff(today, e.expiry) < 0;
 const isStockSoon = (e, today) => { if (e.kind !== 'stock' || e.expiry === NO_EXPIRY) return false; const d = dayDiff(today, e.expiry); return d >= 0 && d <= data.settings.stockWarn; };
-const isSemiSoon = (e, today) => { if (e.kind !== 'semi' || e.expiry === NO_EXPIRY) return false; const d = dayDiff(today, e.expiry); return d >= 0 && d <= SOON_DAYS; };
+const isSemiSoon = (e, today) => { if (e.kind !== 'semi' || e.expiry === NO_EXPIRY) return false; const d = dayDiff(today, e.expiry); return d >= 0 && d <= semiWarnDays(); };
 let batchMode = 'all';
 // 彙整成標籤：groups（groupLots 結果）→ Map(產品 → { product, unit, stock, semi, total, exps: [標籤] })，只算有剩的
 //   現貨：每個「批號＋有效日期」一個標籤（kind 'stock'）；半成品：每個有效日期一個標籤（kind 'semi'，沒有批號，記製作日期）
@@ -477,7 +478,7 @@ function renderBatches(groups, today) {
   // 篩選：全部｜現貨到期（剩現貨提醒天數以內）｜半成品到期（15 天內）｜已過期；篩選時每列只顯示符合的有效日期
   const inRange = (e, m) => m === 'stockSoon' ? isStockSoon(e, today) : m === 'semiSoon' ? isSemiSoon(e, today) : isGone(e, today);
   const inMode = e => batchMode === 'all' || inRange(e, batchMode);
-  const MODES = { stockSoon: [`現貨到期（剩 ${sw} 天內）`, 'batchStockN'], semiSoon: [`半成品到期（${SOON_DAYS} 天內）`, 'batchSemiN'], expired: ['已過期', 'batchExpN'] };
+  const MODES = { stockSoon: [`現貨到期（剩 ${sw} 天內）`, 'batchStockN'], semiSoon: [`半成品到期（${semiWarnDays()} 天內）`, 'batchSemiN'], expired: ['已過期', 'batchExpN'] };
   // 按鈕上的紅色數字：幾項產品（品號）有現貨到期／半成品到期／已過期的庫存
   for (const [m, [lab, id]] of Object.entries(MODES)) {
     const n = [...byP.values()].filter(p => p.exps.some(e => inRange(e, m))).length, el = $(id);
@@ -526,7 +527,7 @@ function renderProducts(products) {
   $('productTable').innerHTML = table(['產品名稱', '單位', '期初入庫#', '累計生產#', '累計扣貨#', split ? '可用庫存#' : '可用庫存（現貨）#', ...(split ? ['現貨#', '半成品#'] : []), '已過期量#', '近效期量#', '最近有效日期', '安全庫存狀態'], rows.map(x => { const st = x.lowStock && x.usable < x.lowStock ? badge(`低於 ${fmt(x.lowStock)}`, 'bad') : x.lowStock ? badge('正常', 'ok') : badge('未設定', 'other'); return `<tr>${td(`<strong>${esc(x.name)}</strong>`)}${td(esc(x.unit))}<td class="num">${fmt(x.opened)}</td><td class="num">${fmt(x.produced)}</td><td class="num">${fmt(x.used)}</td><td class="num">${fmt(x.usable)}</td>${split ? `<td class="num">${fmt(x.stock)}</td><td class="num">${fmt(x.semi)}</td>` : ''}<td class="num">${fmt(x.expired)}</td><td class="num">${fmt(x.warning)}</td>${tdm(x.oldest)}${td(st)}</tr>`; }), '尚無產品，請先建立期初庫存或生產紀錄');
 }
 function renderSettings() {
-  for (const [id, v] of [['warnDays', data.settings.warnDays], ['defaultShelf', data.settings.defaultShelf], ['stockDays', data.settings.stockDays], ['stockWarn', data.settings.stockWarn]]) { const el = $(id); if (document.activeElement !== el) el.value = v; }
+  for (const [id, v] of [['semiWarn', data.settings.semiWarn], ['defaultShelf', data.settings.defaultShelf], ['stockDays', data.settings.stockDays], ['stockWarn', data.settings.stockWarn]]) { const el = $(id); if (document.activeElement !== el) el.value = v; }
   { const r = sellRule(); $('sellRuleText').textContent = `蛋糕類 ${r.cake.days} 天、第 ${r.cake.warnFrom} 天起提醒；生巧克力（CL 開頭）${r.choc.days} 天、第 ${r.choc.warnFrom} 天起提醒。只用在門市，入貨那天算第 1 天；總公司照半成品、現貨的有效日期。`; }
   const rows = searchable(byProductName(data.products), $('settingFilter').value, ['name']);
   $('productSettingsTable').innerHTML = table(['產品', '單位', '保存天數#', '低庫存警戒量#', ...(can('setting') ? ['操作'] : [])], rows.map(p => `<tr>${td(`<strong>${esc(p.name)}</strong>`)}${td(esc(p.unit))}<td class="num">${fmt(p.shelfDays)} 天</td><td class="num">${p.lowStock ? fmt(p.lowStock) : '—'}</td>${can('setting') ? td(`<button type="button" class="btn small" data-action="edit-product" data-id="${esc(p.id)}">修改設定</button>`) : ''}</tr>`), '新增期初庫存或生產資料後，產品會自動顯示在這裡');
@@ -765,7 +766,7 @@ async function deleteAdjust(id) {
 const SHOP_TYPES = { in: '入貨', sale: '銷售', waste: '報廢' };
 const shopMode = Object.fromEntries(SHOPS.map(s => [s.id, 'all']));
 const shopName = id => (SHOPS.find(s => s.id === id) || {}).name || id;
-// 門市規則存在 settings 'shop'：shelfDays 門市保存天數（入貨日起算）、warnDays 剩幾天內提醒
+// 門市的可販售天數與提醒日存在 settings 'sell'（見 sellRule）；舊的 settings 'shop' 已不用
 // 門市：入貨那天算第 1 天，最後可販售日＝入貨日＋可販售天數－1（依產品類別；規則改了，已入貨的也跟著重算）
 const shopExpiryFor = (product, date) => sellEnd(product, date);
 const shopExp = r => shopExpiryFor(r.product, r.date);
@@ -1571,7 +1572,7 @@ function bind() {
     for (const f of ['shopFilter-', 'shopRecFilter-']) $(f + id).addEventListener('input', scheduleRender);
     $('shopSeg-' + id).addEventListener('click', e => { const b = e.target.closest('[data-smode]'); if (!b) return; shopMode[id] = b.dataset.smode; scheduleRender(); });
   }
-  $('settingsForm').addEventListener('submit', e => { e.preventDefault(); if (!can('setting')) return; const w = Number($('warnDays').value), s = Number($('defaultShelf').value), k = Number($('stockDays').value), kw = Number($('stockWarn').value); if (!Number.isInteger(w) || w < 1 || w > 3650 || !Number.isInteger(s) || s < 0 || s > 36500) { toast('請填寫有效的預警及保存天數（整數）', true); return; } if (!Number.isInteger(k) || k < 1 || k > 365 || !Number.isInteger(kw) || kw < 0 || kw > 60) { toast('現貨可放天數要是 1～365、現貨提醒天數要是 0～60 的整數', true); return; } act(() => { FEStore.save('settings', { id: 'main', warnDays: w, defaultShelf: s, stockDays: k, stockWarn: kw }); toast(`系統設定已儲存：現貨可放 ${k} 天、剩 ${kw} 天內提醒`); }); });
+  $('settingsForm').addEventListener('submit', e => { e.preventDefault(); if (!can('setting')) return; const mw = Number($('semiWarn').value), sh = Number($('defaultShelf').value), k = Number($('stockDays').value), kw = Number($('stockWarn').value); if (!Number.isInteger(mw) || mw < 1 || mw > 365 || !Number.isInteger(sh) || sh < 0 || sh > 36500) { toast('請填寫有效的半成品警示天數（1～365）與保存天數（整數）', true); return; } if (!Number.isInteger(k) || k < 1 || k > 365 || !Number.isInteger(kw) || kw < 0 || kw > 60) { toast('現貨可放天數要是 1～365、現貨提醒天數要是 0～60 的整數', true); return; } act(() => { FEStore.save('settings', { id: 'main', warnDays: data.settings.warnDays, defaultShelf: sh, stockDays: k, stockWarn: kw, semiWarn: mw }); toast(`系統設定已儲存：現貨可放 ${k} 天、剩 ${kw} 天內提醒；半成品剩 ${mw} 天內警示`); }); });
   for (const id of ['oMfg', 'oShelf']) $(id).addEventListener('change', () => autoExpiry('o')); $('oProduct').addEventListener('change', () => productDefaults('o'));
   const bm = $('portalBm'); bm.setAttribute('href', portalBookmarklet());
   bm.addEventListener('click', e => { e.preventDefault(); toast('請把這顆按鈕「拖曳」到瀏覽器的書籤列，再到入口網站的頁面按書籤。'); });
