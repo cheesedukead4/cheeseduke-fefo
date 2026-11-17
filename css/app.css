@@ -201,6 +201,13 @@ html.auth-locked .app{display:none}
 .rq input{width:54px;border:1px solid var(--line);border-radius:6px;padding:4px 6px;text-align:right;background:var(--surface);color:var(--ink);font-size:13px}
 .rq-sum{font-size:12px;font-weight:700;color:var(--ok-fg,var(--muted))}
 .rq-sum.bad{color:var(--bad-fg)}
+/* 庫存盤點 */
+.aud-prod td{background:var(--surface-2);border-top:1px solid var(--line)}
+.aud-in{width:76px;border:1px solid var(--line);border-radius:6px;padding:5px 7px;text-align:right;background:var(--surface);color:var(--ink);font-size:13px}
+.aud-in:placeholder-shown{border-style:dashed}
+.row-on td{background:var(--accent-soft)}
+#auditActions:empty{display:none}
+#auditActions .notice{margin-bottom:10px}
 /* 門市頁的分頁 */
 .stabs{display:flex;gap:4px;margin:0 0 18px;border-bottom:1px solid var(--line);overflow-x:auto;scrollbar-width:none}
 .stabs::-webkit-scrollbar{display:none}
