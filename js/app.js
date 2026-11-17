@@ -782,7 +782,7 @@ function sanitizeShop(r) {
   const x = { id: String(r.id), seq: Number(r.seq) || 0, shop: r.shop, type: r.type, date: r.date, product, quantity: q, batch: cleanBatch(r.batch), note: clean(r.note), by: clean(r.by), at: r.at || '', ...(r.editBy ? { editBy: clean(r.editBy), editAt: r.editAt || '' } : {}) };
   if (r.type === 'in') {
     x.expiryDate = isDate(r.expiryDate) ? r.expiryDate : ''; if (isDate(r.fromDate)) x.fromDate = r.fromDate;
-    // scan：門市掃描／點選確認的批號數量 { 批號: 數量 }
+    // scan：門市確認的批號數量 { 批號: 數量 }（按「確認」或點選正確的批號）
     if (r.scan && typeof r.scan === 'object') { const sc = {}; for (const [b, v] of Object.entries(r.scan).slice(0, 30)) { const k = cleanBatch(b), n = Number(v); if (k && n > 0 && n < 1e7) sc[k] = clampQty((sc[k] || 0) + n); } if (Object.keys(sc).length) x.scan = sc; }
   }
   return x;
@@ -793,7 +793,7 @@ function shopLedger(shop, list = data.shops) {
   const lots = [], outs = new Map(), plan = shopBatchPlan(list);
   for (const r of recs) {
     if (r.type === 'in') {
-      // 門市確認過的（填批號、掃描、點選）＋沒確認的照總公司出貨扣批推定（可能拆成好幾個批號）
+      // 門市確認過的（填批號、按確認、點選）＋沒確認的照總公司出貨扣批推定（可能拆成好幾個批號）
       const parts = plan.get(r.id) || [{ batch: '', qty: r.quantity, unknown: true }];
       parts.forEach((p, k) => lots.push({ id: `${r.id}#${k}`, recId: r.id, product: r.product, batch: p.batch || '', guess: !p.confirmed, opening: !!p.opening, expiry: shopExp(r), date: r.date, qty: p.qty, left: p.qty }));
       continue;
@@ -829,7 +829,7 @@ function hqShipBatches(ledger) {
   for (const list of m.values()) list.sort((a, b) => (a.opening ? 0 : 1) - (b.opening ? 0 : 1) || cmp(a.exp, b.exp) || cmp(a.batch, b.batch));
   return m;
 }
-// 門市已確認的批號數量：r.batch（整筆都是這個批號）或 r.scan（掃描、點選確認的 { 批號: 數量 }），最多到入貨數量
+// 門市已確認的批號數量：r.batch（整筆都是這個批號）或 r.scan（按確認、點選確認的 { 批號: 數量 }），最多到入貨數量
 function shopConfirmed(r) {
   if (r.type !== 'in') return {};
   if (r.batch) return { [r.batch]: r.quantity };
@@ -883,7 +883,7 @@ function shopSectionHtml(s) {
   return `<section id="shop-${id}" class="section">
     <div class="notice"><span id="shopRule-${id}"></span> <button type="button" class="btn small need-setting" data-action="shop-rule">修改可販售期</button> <button type="button" class="btn small need-storeout" data-action="store-out" title="讀揀貨總表的排單表，把各門市的出庫量帶入成入貨（批號自動推定）">從揀貨總表帶入今天的入貨</button></div>
     <div id="shopKpi-${id}" class="grid-kpi"></div>
-    <div class="panel need-shop_${id}"><div class="panel-head"><div><h2>${n}門市入貨確認（掃描批號）</h2><p id="rcvInfo-${id}"></p></div><div class="toolbar"><input id="rcvDate-${id}" class="search" type="date" aria-label="入貨日期"><button type="button" class="btn small primary" data-action="rcv-camera" data-shop="${id}">用手機相機掃描</button></div></div><div class="panel-body"><input id="rcvInput-${id}" class="search rcv-input" placeholder="用掃描槍掃盒子上的條碼／QR code，或輸入批號後按 Enter" autocomplete="off" autocapitalize="characters"></div><div id="rcvList-${id}" class="table-scroll"></div></div>
+    <div class="panel need-shop_${id}"><div class="panel-head"><div><h2>${n}門市入貨確認</h2><p id="rcvInfo-${id}"></p></div><div class="toolbar"><input id="rcvDate-${id}" class="search" type="date" aria-label="入貨日期"></div></div><div id="rcvList-${id}" class="table-scroll"></div></div>
     <div class="panel form-area need-shop_${id}"><div class="panel-head"><div><h2>登錄${n}門市入貨／銷售／報廢</h2><p>銷售、報廢可以按右邊「批次匯入」從 Excel／POS 報表一次貼上；入貨會從揀貨總表帶入，批號可以不填（照總公司當天的出貨扣批自動推定）。</p></div><div class="toolbar"><button type="button" class="btn small primary" data-action="shop-import" data-shop="${id}">批次匯入銷售／報廢</button></div></div><div class="panel-body"><form id="shopForm-${id}" class="form-grid" novalidate>
       <div class="field"><label for="shDate-${id}">日期 *</label><input id="shDate-${id}" type="date" required></div>
       <div class="field"><label for="shType-${id}">類別 *</label><select id="shType-${id}"><option value="in">入貨（配送到門市）</option><option value="sale">銷售</option><option value="waste">報廢</option></select></div>
@@ -1072,13 +1072,10 @@ function renderStoreOutInfo() {
   const m = storeOutMeta();
   el.textContent = m.at ? `上次帶入：${new Date(m.at).toLocaleString('zh-TW', { month: 'numeric', day: 'numeric', hour: '2-digit', minute: '2-digit' })}（${m.by || '—'}）${m.first === m.last ? shortDate(m.first) : `${shortDate(m.first)}～${shortDate(m.last)}`}：${SHOPS.map(x => `${x.name} ${(m.counts || {})[x.id] || 0} 項`).join('、')}${(m.notFound || []).length ? `；${m.notFound.map(shortDate).join('、')} 沒有排單表` : ''}${(m.unknown || []).length ? `；對不到產品：${m.unknown.slice(0, 5).join('、')}` : ''}` : '還沒有帶入過。按右邊的按鈕，或用書籤同步入口網站時會自動帶入今天的。';
 }
-/* ---------- 門市入貨確認：掃描盒子上的批號條碼／QR code ----------
-   掃描槍（當鍵盤用）在輸入框掃、或用手機相機掃（html5-qrcode，從 CDN 載入）；每掃一盒＝那個批號 1 個。
-   App 依批號找那天的入貨：批號的品號碼對得上、而且是總公司那天可能出的批號（hqCandidates）。好幾個品項都對得上（例如 CK-01 和 CK-01|YB-86 的批號品號碼都是 CK01）就跳出來選。
-   也可以直接點「可能的批號」把還沒確認的數量全部設成那個批號。確認的數量存在入貨紀錄的 scan，其他門市推定時會先扣掉。 */
+/* ---------- 門市入貨確認 ----------
+   總公司那天這個品項只出一個批號 → 自動確認；出了好幾個批號 → 門市看盒子上的批號，跟推定的一樣按「確認」，不一樣就點正確的批號。
+   確認的數量存在入貨紀錄的 scan，其他門市推定時會先扣掉。 */
 const rcvDate = {};
-const BATCH_RE = /[A-Z]{2}[0-9AB][Q-Z][0-9][0-9A-V][A-Z0-9]{2}/;
-function parseScan(text) { const t = String(text || '').toUpperCase().replace(/\s+/g, ''), m = t.match(BATCH_RE); return m ? m[0] : (/^[A-Z0-9]{6,12}$/.test(t) ? t : ''); }
 // 總公司某天可能出給門市的批號：前一天結束還有的現貨（與半成品，當天轉現貨的批號）＋當天新做的
 let candMemo = null;
 function hqCandidates(product, date) {
@@ -1090,9 +1087,7 @@ function hqCandidates(product, date) {
   for (const l of led(date).lots) if (l.product === product && l.entryDate === date) { const b = lab(l); if (b) set.add(b); }
   const out = [...set].sort(); candMemo.out.set(key, out); return out;
 }
-const batchCodeOf = b => b.length === 8 ? b.slice(0, 2) + b.slice(6) : '';
 function rcvDay(sid) { if (isDate(rcvDate[sid])) return rcvDate[sid]; const t = TODAY(), ds = [...new Set(data.shops.filter(r => r.shop === sid && r.type === 'in' && r.date <= t).map(r => r.date))].sort(); return ds.length ? ds[ds.length - 1] : t; }
-function beep(ok = true) { try { const C = window.AudioContext || window.webkitAudioContext; if (!C) return; const c = beep.c || (beep.c = new C()), o = c.createOscillator(), g = c.createGain(); o.frequency.value = ok ? 1200 : 300; g.gain.value = 0.08; o.connect(g); g.connect(c.destination); o.start(); o.stop(c.currentTime + (ok ? 0.08 : 0.25)); } catch (e) {} }
 function renderReceive(sid, plan) {
   const day = rcvDay(sid), di = $('rcvDate-' + sid); if (document.activeElement !== di) di.value = day;
   const recs = data.shops.filter(r => r.shop === sid && r.type === 'in' && r.date === day).sort((a, b) => productOrder(a.product, b.product)), edit = can(shopPerm(sid));
@@ -1114,7 +1109,7 @@ function renderReceive(sid, plan) {
       manual ? `<button type="button" class="btn small danger" data-action="rcv-clear" data-shop="${sid}" data-id="${esc(r.id)}">清除</button>` : ''].filter(Boolean).join('');
     return `<tr>${td(`<strong>${esc(r.product)}</strong>`)}<td class="num">${fmt(r.quantity)}</td>${td(st)}<td class="exp-cell"><div class="exp-chips">${chips || '<span class="who">—</span>'}</div></td><td class="exp-cell"><div class="segment">${ops}</div></td></tr>`;
   });
-  $('rcvInfo-' + sid).textContent = recs.length ? `${day} 入貨 ${recs.length} 項：自動確認 ${auto} 項（總公司那天這個品項只出一個批號）、門市已確認 ${done} 項、待確認 ${wait} 項（總公司出了好幾個批號）。待確認的看盒子上的批號：跟推定的一樣就按「確認」，不一樣就點正確的批號，或直接掃條碼` : `${day} 沒有入貨紀錄`;
+  $('rcvInfo-' + sid).textContent = recs.length ? `${day} 入貨 ${recs.length} 項：自動確認 ${auto} 項（總公司那天這個品項只出一個批號）、門市已確認 ${done} 項、待確認 ${wait} 項（總公司出了好幾個批號）。待確認的看盒子上的批號：跟推定的一樣就按「確認」，不一樣就點正確的批號` : `${day} 沒有入貨紀錄`;
   $('rcvList-' + sid).innerHTML = table(['產品', '入貨#', '狀態', '批號（綠＝已確認、灰＝推定）', '確認'], rows, `${day} 沒有入貨紀錄`);
 }
 // 按「確認」：推定的批號就是盒子上的，存成已確認（批號不明的部分不動）
@@ -1136,27 +1131,6 @@ function saveScan(r, batch, n) {
   FEStore.save('shop', { ...rest, batch: '', scan, ...stampEdit() });
   return add;
 }
-async function rcvScan(sid, text) {
-  if (!can(shopPerm(sid))) return;
-  const batch = parseScan(text);
-  if (!batch) { beep(false); toast(`看不懂掃到的內容：「${String(text).slice(0, 30)}」（要有 8 碼批號，例如 CKAS7H01）`, true, 6000); return; }
-  const day = rcvDay(sid), recs = data.shops.filter(r => r.shop === sid && r.type === 'in' && r.date === day && clampQty(r.quantity - shopConfirmedQ(r)) > 1e-7);
-  let hits = recs.filter(r => hqCandidates(r.product, shopFrom(r)).includes(batch)), warn = '';
-  if (!hits.length) { hits = recs.filter(r => productBatchCode(r.product) === batchCodeOf(batch)); if (hits.length) warn = `（${batch} 不在總公司 ${day} 可能出的批號裡，請再確認）`; }
-  if (!hits.length) {
-    const all = data.shops.filter(r => r.shop === sid && r.type === 'in' && r.date === day && productBatchCode(r.product) === batchCodeOf(batch));
-    beep(false); toast(all.length ? `${batch}：這個品項 ${day} 的入貨已經全部確認完了` : `${batch}：${shopName(sid)}門市 ${day} 的入貨裡沒有這個品項（可能送錯，或還沒帶入入貨）`, true, 7000); return;
-  }
-  let r = hits[0];
-  if (hits.length > 1) {
-    const pick = await modal({ title: `${batch} 是哪一個品項？`, ok: '確定', html: `<p class="modal-note">這個批號的品號碼 ${esc(batchCodeOf(batch))} 有好幾個品項（不同盒子／烙印）對得上，請選這一盒是哪個：</p>${hits.map((x, i) => `<label class="perm"><input type="radio" name="rcv-pick" value="${i}"${i ? '' : ' checked'}><span>${esc(x.product)}<span>還沒確認 ${fmt(clampQty(x.quantity - shopConfirmedQ(x)))}／${fmt(x.quantity)} 個</span></span></label>`).join('')}`, collect: b => Number((b.querySelector('input[name="rcv-pick"]:checked') || {}).value || 0) });
-    if (pick === false || pick === undefined || pick === null) return;
-    r = hits[pick] || hits[0];
-  }
-  let added = 0; act(() => { added = saveScan(r, batch, 1); });
-  const now = data.shops.find(x => x.id === r.id) || r;
-  beep(!warn); toast(`✓ ${r.product}：${batch}（已確認 ${fmt(shopConfirmedQ(now))}／${fmt(r.quantity)}）${warn}`, !!warn, warn ? 7000 : 2500);
-}
 function rcvPick(sid, id, batch) {
   if (!can(shopPerm(sid))) return;
   const r = data.shops.find(x => x.id === id && x.shop === sid); if (!r) return;
@@ -1166,30 +1140,6 @@ function rcvClear(sid, id) {
   if (!can(shopPerm(sid))) return;
   const r = data.shops.find(x => x.id === id && x.shop === sid); if (!r) return;
   act(() => { const { scan, ...rest } = r; FEStore.save('shop', { ...rest, batch: '', ...stampEdit() }); toast(`已清除 ${r.product} 的確認，改回自動推定`); });
-}
-let scanLibPromise = null;
-function loadScanner() {
-  if (window.Html5Qrcode) return Promise.resolve(window.Html5Qrcode);
-  if (!scanLibPromise) scanLibPromise = new Promise((res, rej) => { const urls = ['https://cdnjs.cloudflare.com/ajax/libs/html5-qrcode/2.3.8/html5-qrcode.min.js', 'https://cdn.jsdelivr.net/npm/html5-qrcode@2.3.8/html5-qrcode.min.js']; const next = i => { if (i >= urls.length) { scanLibPromise = null; return rej(Error('掃描元件載入失敗，請確認網路')); } const sc = document.createElement('script'); sc.src = urls[i]; sc.onload = () => window.Html5Qrcode ? res(window.Html5Qrcode) : next(i + 1); sc.onerror = () => next(i + 1); document.head.appendChild(sc); }; next(0); });
-  return scanLibPromise;
-}
-async function rcvCamera(sid) {
-  if (!can(shopPerm(sid))) return;
-  let Lib; try { Lib = await loadScanner(); } catch (e) { toast(e.message, true); return; }
-  const pr = modal({ title: `${shopName(sid)}門市：用相機掃描批號`, ok: '完成', noCancel: true, html: `<p class="modal-note">把盒子標籤上的<strong>條碼</strong>（批號下面那條，例如 CKAS7H52）橫放對準方框，<strong>一盒掃一次</strong>（聽到「嗶」再掃下一盒）。掃到會自動記到 ${esc(rcvDay(sid))} 的入貨。</p><div id="rcvCam" style="width:100%;max-width:420px;margin:0 auto"></div><p id="rcvLast" class="helper" style="text-align:center"></p>` });
-  let cam = null, last = '', lastAt = 0;
-  try {
-    // 盒子標籤是一維條碼（Code 128，內容就是 8 碼批號，例如 CKAS7H52），也支援 QR code
-    const F = window.Html5QrcodeSupportedFormats, formats = F ? [F.CODE_128, F.CODE_39, F.CODE_93, F.QR_CODE, F.EAN_13, F.ITF].filter(x => x !== undefined) : undefined;
-    cam = new Lib('rcvCam', { verbose: false, ...(formats ? { formatsToSupport: formats } : {}), experimentalFeatures: { useBarCodeDetectorIfSupported: true } });
-    await cam.start({ facingMode: 'environment' }, { fps: 12, qrbox: (w, h) => ({ width: Math.max(200, Math.floor(Math.min(w, 520) * 0.9)), height: Math.max(90, Math.floor(Math.min(h, 400) * 0.35)) }) }, text => {
-      const now = Date.now(); if (text === last && now - lastAt < 1500) return; last = text; lastAt = now;
-      const el = $('rcvLast'); if (el) el.textContent = '掃到：' + text;
-      rcvScan(sid, text);
-    }, () => {});
-  } catch (e) { const el = $('rcvLast'); if (el) el.textContent = '沒辦法開相機：' + (e && e.message || e) + '（請允許這個網站使用相機，或改用掃描槍／手動輸入）'; }
-  await pr;
-  try { if (cam && cam.isScanning) await cam.stop(); if (cam) cam.clear(); } catch (e) {}
 }
 /* ---------- 門市批次匯入（銷售／報廢） ----------
    從 Excel、POS 報表複製貼上：每一行一個品項，自動找「品號或品名」和「數量」（數量取那一行最後一個數字；標題列、合計列沒有對到產品的會略過）。
@@ -1673,7 +1623,6 @@ async function handleAction(el) {
   if (a === 'rcv-pick') return rcvPick(el.dataset.shop, id, el.dataset.batch);
   if (a === 'rcv-confirm') return rcvConfirm(el.dataset.shop, id);
   if (a === 'rcv-clear') return rcvClear(el.dataset.shop, id);
-  if (a === 'rcv-camera') return rcvCamera(el.dataset.shop);
   if (a === 'shop-delete') return deleteShopRec(el.dataset.shop, id);
   if (a === 'shop-batch') return editShopBatch(el.dataset.shop, id);
   if (a === 'store-out') return syncStoreOut(storeOutDates());
@@ -1719,7 +1668,6 @@ function bind() {
     for (const f of ['shQty-', 'shBatch-']) $(f + id).addEventListener('input', () => shopFormSync(id));
     for (const f of ['shopFilter-', 'shopRecFilter-']) $(f + id).addEventListener('input', scheduleRender);
     $('shopSeg-' + id).addEventListener('click', e => { const b = e.target.closest('[data-smode]'); if (!b) return; shopMode[id] = b.dataset.smode; scheduleRender(); });
-    $('rcvInput-' + id).addEventListener('keydown', e => { if (e.key !== 'Enter') return; e.preventDefault(); const v = e.target.value; e.target.value = ''; if (v.trim()) rcvScan(id, v); });
     $('rcvDate-' + id).addEventListener('change', e => { if (isDate(e.target.value)) { rcvDate[id] = e.target.value; scheduleRender(); } });
   }
   $('settingsForm').addEventListener('submit', e => { e.preventDefault(); if (!can('setting')) return; const mw = Number($('semiWarn').value), sh = Number($('defaultShelf').value), k = Number($('stockDays').value), kw = Number($('stockWarn').value); if (!Number.isInteger(mw) || mw < 1 || mw > 365 || !Number.isInteger(sh) || sh < 0 || sh > 36500) { toast('請填寫有效的半成品警示天數（1～365）與保存天數（整數）', true); return; } if (!Number.isInteger(k) || k < 1 || k > 365 || !Number.isInteger(kw) || kw < 0 || kw > 60) { toast('現貨可放天數要是 1～365、現貨提醒天數要是 0～60 的整數', true); return; } act(() => { FEStore.save('settings', { id: 'main', warnDays: data.settings.warnDays, defaultShelf: sh, stockDays: k, stockWarn: kw, semiWarn: mw }); toast(`系統設定已儲存：現貨可放 ${k} 天、剩 ${kw} 天內提醒；半成品剩 ${mw} 天內警示`); }); });
