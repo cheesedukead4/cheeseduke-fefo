@@ -31,7 +31,8 @@ const PORTAL_PENDING = 'fe_portal_pending';
 })();
 
 // 門市：每間一頁，權限代號 shop_代號（例如 shop_a11）
-const SHOPS = [{ id: 'a11', name: 'A11' }, { id: 'jz', name: '京站' }, { id: 'dq', name: '東橋' }];
+// pos：POS 銷售明細「倉庫」欄的代號（匯入銷售／報廢檔案時用來分門市）
+const SHOPS = [{ id: 'a11', name: 'A11', pos: '5' }, { id: 'jz', name: '京站', pos: '4' }, { id: 'dq', name: '東橋', pos: '24' }];
 const shopPerm = id => 'shop_' + id;
 const PERMS = [
   { id: 'produce', label: '生產與期初庫存', desc: '新增、修改、刪除期初庫存；入口網站同步時存生產數字' },
@@ -945,6 +946,9 @@ function sanitizeShop(r) {
     x.expiryDate = isDate(r.expiryDate) ? r.expiryDate : ''; if (isDate(r.fromDate)) x.fromDate = r.fromDate;
     // scan：門市確認的批號數量 { 批號: 數量 }（按「確認」或點選正確的批號）
     if (r.scan && typeof r.scan === 'object') { const sc = {}; for (const [b, v] of Object.entries(r.scan).slice(0, 30)) { const k = cleanBatch(b), n = Number(v); if (k && n > 0 && n < 1e7) sc[k] = clampQty((sc[k] || 0) + n); } if (Object.keys(sc).length) x.scan = sc; }
+  } else if (r.pref && typeof r.pref === 'object') {
+    // pref：匯入的 POS 銷售明細上的批號 { 批號: 數量 }（門市帳先扣這些批號，不夠才先到期先扣）
+    const pf = {}; for (const [b, v] of Object.entries(r.pref).slice(0, 30)) { const k = cleanBatch(b), n = Number(v); if (k && n > 0 && n < 1e7) pf[k] = clampQty((pf[k] || 0) + n); } if (Object.keys(pf).length) x.pref = pf;
   }
   return x;
 }
@@ -961,7 +965,10 @@ function shopLedger(shop, list = data.shops) {
     }
     let need = r.quantity; const parts = [];
     const cand = lots.filter(l => l.product === r.product && l.left > 0 && l.date <= r.date && (!r.batch || l.batch === r.batch) && (r.type === 'waste' || l.expiry >= r.date)).sort((a, b) => cmp(a.expiry, b.expiry) || cmp(a.date, b.date));
-    for (const l of cand) { if (need <= 0) break; const q = clampQty(Math.min(l.left, need)); l.left = clampQty(l.left - q); need = clampQty(need - q); parts.push({ batch: l.batch, expiry: l.expiry, q }); }
+    const take = (l, want) => { const q = clampQty(Math.min(l.left, want)); if (q <= 0) return 0; l.left = clampQty(l.left - q); need = clampQty(need - q); const x = parts.find(y => y.batch === l.batch && y.expiry === l.expiry); if (x) x.q = clampQty(x.q + q); else parts.push({ batch: l.batch, expiry: l.expiry, q }); return q; };
+    // 匯入的 POS 銷售明細有批號（r.pref { 批號: 數量 }）：先扣那個批號，不夠或門市沒有那個批號才照先到期先扣（不會因為批號對不上就變缺口）
+    if (r.pref && !r.batch) for (const [b, pq] of Object.entries(r.pref)) { let want = clampQty(Math.min(Number(pq) || 0, need)); for (const l of cand) { if (want <= 0) break; if (l.batch === b) want = clampQty(want - take(l, want)); } }
+    for (const l of cand) { if (need <= 0) break; take(l, need); }
     outs.set(r.id, { done: clampQty(r.quantity - need), short: need, parts });
   }
   return { lots, outs };
@@ -1047,7 +1054,7 @@ function shopSectionHtml(s) {
     <div class="panel"><div class="panel-head"><div><h2>${n}門市入貨確認</h2><p id="rcvInfo-${id}"></p></div><div class="toolbar"><button type="button" class="btn small primary need-shop_${id}" data-action="ocr-slip" data-shop="${id}" title="用手機拍門市出庫單，自動讀品號、數量、製造日期，換成批號">拍出庫單辨識</button><input type="file" id="ocrFile-${id}" accept="image/*" capture="environment" hidden><button type="button" class="btn small need-storeout" data-action="store-out" title="讀揀貨總表的排單表，把各門市的出庫量帶入成入貨（批號自動推定）">從揀貨總表帶入今天的入貨</button><input id="rcvDate-${id}" class="search" type="date" aria-label="入貨日期"></div></div><div id="rcvList-${id}" class="table-scroll"></div></div>
     </div>
     <div class="shop-pane" data-pane="entry">
-    <div class="panel form-area need-shop_${id}"><div class="panel-head"><div><h2>登錄${n}門市入貨／銷售／報廢</h2><p>銷售、報廢可以按右邊「批次匯入」從 Excel／POS 報表一次貼上；入貨會從揀貨總表帶入，批號可以不填（照總公司當天的出貨扣批自動推定）。</p></div><div class="toolbar"><button type="button" class="btn small primary" data-action="shop-import" data-shop="${id}">批次匯入銷售／報廢</button></div></div><div class="panel-body"><form id="shopForm-${id}" class="form-grid" novalidate>
+    <div class="panel form-area need-shop_${id}"><div class="panel-head"><div><h2>登錄${n}門市入貨／銷售／報廢</h2><p>銷售、報廢可以按右邊「匯入」選 Excel／CSV 檔案，或從 POS 報表一次貼上；入貨會從揀貨總表帶入，批號可以不填（照總公司當天的出貨扣批自動推定）。</p></div><div class="toolbar"><button type="button" class="btn small primary" data-action="shop-import" data-shop="${id}">匯入銷售／報廢（檔案或貼上）</button></div></div><div class="panel-body"><form id="shopForm-${id}" class="form-grid" novalidate>
       <div class="field"><label for="shDate-${id}">日期 *</label><input id="shDate-${id}" type="date" required></div>
       <div class="field"><label for="shType-${id}">類別 *</label><select id="shType-${id}"><option value="in">入貨（配送到門市）</option><option value="sale">銷售</option><option value="waste">報廢</option></select></div>
       <div class="field span2"><label for="shProduct-${id}">產品 *</label><input id="shProduct-${id}" list="productNames" required placeholder="輸入品號或品名，從清單選擇" maxlength="80" autocomplete="off"></div>
@@ -1451,9 +1458,9 @@ async function ocrPreview(sid, slip, text) {
   toast(`已套用 ${by.size} 個品項的批號${miss.length ? `；對不到：${miss.join('、')}` : ''}${warn.length ? `；數量跟入貨不一樣（以出庫單為準，多的部分不算）：${warn.join('、')}` : ''}`, !!(miss.length || warn.length), miss.length || warn.length ? 10000 : 4000);
 }
 /* ---------- 門市批次匯入（銷售／報廢） ----------
-   從 Excel、POS 報表複製貼上：每一行一個品項，自動找「品號或品名」和「數量」（數量取那一行最後一個數字；標題列、合計列沒有對到產品的會略過）。
-   同一個品號貼好幾行會加總。存成那天的銷售（或報廢）紀錄，id imp-類別-門市-日期-品號：同一天、同一類別再匯入一次會取代上次匯入的數字
-   （上次有、這次沒有的品項會移除），手動登錄的紀錄不受影響。批號不用填，照先到期先扣。之後有匯入連結時，帶入也用同一套規則。 */
+   選檔案（POS 銷售明細 Excel／CSV）或從 Excel 複製貼上，欄位規則見 parseShopPaste。存成那天的銷售（或報廢）紀錄，id imp-類別-門市-日期-品號：
+   同一間門市、同一天、同一類別再匯入一次會取代上次匯入的數字（上次有、這次沒有的品項會移除），手動登錄的紀錄不受影響。
+   批號不用填：有 POS 批號就存成 pref（先扣那個批號），其餘照先到期先扣。之後有匯入連結時，帶入也用同一套規則。 */
 function matchProductCell(cell) {
   const v = clean(cell); if (!v) return null;
   const up = v.toUpperCase(), list = data.products.filter(p => !p.virtual);
@@ -1462,61 +1469,180 @@ function matchProductCell(cell) {
     || list.find(p => clean(p.name.slice(productCodeOf(p.name).length)) === v)
     || list.find(p => up.startsWith(productCodeOf(p.name).toUpperCase() + ' ')) || null;
 }
-function parseShopPaste(text) {
-  const items = new Map(), skipped = [];
-  for (const line of String(text || '').split(/\r?\n/)) {
-    if (!line.trim()) continue;
-    const cells = line.split(/\t|,(?=(?:[^"]*"[^"]*")*[^"]*$)/).map(c => clean(c.replace(/^"|"$/g, '')));
-    let p = null, pi = -1;
-    for (let i = 0; i < cells.length && !p; i++) { p = matchProductCell(cells[i]); if (p) pi = i; }
-    let q = NaN;
-    for (let i = cells.length - 1; i >= 0; i--) { if (i === pi) continue; const n = Number(cells[i].replace(/[,，\s]/g, '')); if (cells[i] !== '' && Number.isFinite(n)) { q = n; break; } }
-    if (!p || !(q > 0) || q >= 1e7) { if (cells.some(Boolean)) skipped.push(line.trim().slice(0, 40)); continue; }
-    if (isExcluded(p.name)) { skipped.push(line.trim().slice(0, 40)); continue; }
-    items.set(p.name, clampQty((items.get(p.name) || 0) + q));
+// 表格的日期格子：2026/11/18、2026-11-18、11/18/26（Excel 預設）、20261118、Excel 日期序號
+function parseCellDate(v) {
+  const t = clean(v); if (!t) return '';
+  let m = t.match(/(\d{4})\s*[\/\-.年]\s*(\d{1,2})\s*[\/\-.月]\s*(\d{1,2})/); if (m) { const ds = `${m[1]}-${m[2].padStart(2, '0')}-${m[3].padStart(2, '0')}`; return isDate(ds) ? ds : ''; }
+  m = t.match(/^(\d{1,2})\/(\d{1,2})\/(\d{2,4})$/); if (m) { const y = m[3].length === 2 ? '20' + m[3] : m[3], ds = `${y}-${m[1].padStart(2, '0')}-${m[2].padStart(2, '0')}`; return isDate(ds) ? ds : ''; }
+  m = t.match(/^(20\d{2})(\d{2})(\d{2})$/); if (m) { const ds = `${m[1]}-${m[2]}-${m[3]}`; return isDate(ds) ? ds : ''; }
+  if (/^\d{5}(\.\d+)?$/.test(t)) { const n = Math.floor(Number(t)); if (n > 40000 && n < 60000) { const d = new Date(Date.UTC(1899, 11, 30) + n * 86400000); return d.toISOString().slice(0, 10); } }
+  return '';
+}
+// 分欄：有 Tab 用 Tab（從 Excel 複製、Excel 檔轉出），沒有用逗號（CSV）；引號裡的分隔符號、換行不算
+function splitTable(text) {
+  const t = String(text || '').replace(/^\ufeff/, ''), fs = t.includes('\t') ? '\t' : ',', rows = [];
+  let row = [], cell = '', q = false;
+  for (let i = 0; i < t.length; i++) {
+    const ch = t[i];
+    if (q) { if (ch === '"') { if (t[i + 1] === '"') { cell += '"'; i++; } else q = false; } else cell += ch; continue; }
+    if (ch === '"' && !cell.trim()) { q = true; cell = ''; continue; }
+    if (ch === fs) { row.push(cell); cell = ''; continue; }
+    if (ch === '\n' || ch === '\r') { if (ch === '\r' && t[i + 1] === '\n') i++; row.push(cell); rows.push(row); row = []; cell = ''; continue; }
+    cell += ch;
   }
-  return { items: [...items.entries()].map(([product, quantity]) => ({ product, quantity })).sort((a, b) => productOrder(a.product, b.product)), skipped };
+  row.push(cell); rows.push(row);
+  return rows.map(r => r.map(c => clean(c.replace(/\s+/g, ' ')))).filter(r => r.some(Boolean));
+}
+const numCell = v => { const t = clean(v).replace(/[,，\s]/g, ''); return t === '' ? NaN : Number(t); };
+/* 解析貼上的內容或檔案（Excel／CSV）：
+   有標題列（品號／品名＋數量）就照欄位讀：日期欄 → 依每一列的日期分開匯入；倉庫欄（POS 代號，見 SHOPS.pos）或門市欄 → 分門市（其他倉庫不匯入）；
+   批號欄 → 存成 pref（門市帳先扣那個批號，不夠才先到期先扣）；不在產品清單的（運費、蠟燭、蛋捲…）不匯入。
+   組合品（例如 CK-01|YB-86 6原|天蠍烙）：POS 會分成 CK-01、YB-86 兩行，同一張單（訂單單號或交易時間）兩個都有、而且這間門市收過這個組合品，就合併成組合品。
+   沒有標題列：每一行找品號或品名，數量取那一行最後一個數字（舊做法）。
+   回傳 groups：[{ shop, date（'' = 用畫面選的日期）, items: [{ product, quantity, pref }] }] */
+function parseShopPaste(text, sid) {
+  const rows = splitTable(text), skipped = [], untracked = new Map(), otherWh = new Map();
+  let hi = -1, col = {};
+  for (let i = 0; i < Math.min(rows.length, 8) && hi < 0; i++) {
+    const f = re => rows[i].findIndex(c => re.test(c));
+    const qty = f(/數量|件數|^數$|qty|quantity/i), code = f(/品號|商品編號|商品代碼|編號|代碼|貨號|sku/i), name = f(/品名|商品名稱|名稱|品項|商品/);
+    if (qty >= 0 && (code >= 0 || name >= 0)) hi = i, col = { qty, code, name, date: f(/日期|date/i), wh: f(/倉庫|倉別|庫別/), shop: f(/門市|分店|店別|店名|store/i), batch: f(/批號|批次|^lot/i), order: f(/訂單單號|訂單編號|銷貨單號|^單號/), time: f(/交易時間|交易序號|交易編號/) };
+  }
+  const ents = [];
+  rows.forEach((cells, i) => {
+    if (hi >= 0 && i <= hi) return; // 標題列（和上面的抬頭）
+    if (cells.some(c => /^(合計|小計|總計|總和|total)/i.test(c))) return; // 合計列
+    const line = cells.join(' ').slice(0, 40);
+    let shop = sid, date = '', p = null, q = NaN, batch = '', code = '', key = 'r' + i;
+    if (hi >= 0) {
+      if (col.wh >= 0 || col.shop >= 0) {
+        const v = col.wh >= 0 ? cells[col.wh] || '' : cells[col.shop] || '', s = col.wh >= 0 ? SHOPS.find(x => x.pos === v) : v && SHOPS.find(x => v.includes(x.name));
+        if (!s) { otherWh.set(v || '空白', (otherWh.get(v || '空白') || 0) + 1); return; }
+        shop = s.id;
+      }
+      code = col.code >= 0 ? (cells[col.code] || '').toUpperCase() : '';
+      p = (code && matchProductCell(code)) || (col.name >= 0 && matchProductCell(cells[col.name])) || null;
+      q = numCell(cells[col.qty]);
+      batch = col.batch >= 0 ? cleanBatch(cells[col.batch]) : '';
+      key = (col.order >= 0 && cells[col.order]) || (col.time >= 0 && cells[col.time]) || key;
+      if (col.date >= 0) { date = parseCellDate(cells[col.date]); if (!date) { if (p || q > 0) skipped.push(line); return; } }
+    } else {
+      let pi = -1;
+      for (let k = 0; k < cells.length && !p; k++) { p = matchProductCell(cells[k]); if (p) pi = k; }
+      for (let k = cells.length - 1; k >= 0; k--) { if (k === pi) continue; const n = numCell(cells[k]); if (Number.isFinite(n)) { q = n; break; } }
+      if (p) code = productCodeOf(p.name).toUpperCase();
+    }
+    if (!(q > 0) || q >= 1e7) { if (p || (hi < 0 && cells.some(Boolean))) skipped.push(line); return; }
+    if (p && isExcluded(p.name)) return;
+    if (!p && !code) { skipped.push(line); return; }
+    ents.push({ shop, date, key, code, p, left: q, batch, label: p ? p.name : `${code} ${col.name >= 0 ? cells[col.name] || '' : ''}`.trim() });
+  });
+  // 組合品：同一張單裡每個品號都有，而且這間門市收過這個組合品
+  const out = new Map(), add = (shop, date, prod, q, batch) => {
+    const k = shop + '|' + date, g = out.get(k) || { shop, date, m: new Map() }, x = g.m.get(prod.name) || { product: prod.name, quantity: 0, pref: {} };
+    x.quantity = clampQty(x.quantity + q); if (batch) x.pref[batch] = clampQty((x.pref[batch] || 0) + q);
+    g.m.set(prod.name, x); out.set(k, g);
+  };
+  if (hi >= 0) {
+    const combos = data.products.filter(x => !x.virtual && !isExcluded(x.name) && productCodeOf(x.name).includes('|')).map(x => ({ p: x, codes: productCodeOf(x.name).toUpperCase().split('|') }));
+    const byTxn = new Map(); for (const e of ents) { const k = `${e.shop}|${e.date}|${e.key}`; byTxn.set(k, [...(byTxn.get(k) || []), e]); }
+    for (const g of byTxn.values()) for (const c of combos) {
+      const { shop, date } = g[0], got = c.codes.map(cd => g.filter(e => e.code === cd && e.left > 0));
+      if (got.some(a => !a.length)) continue;
+      if (!data.shops.some(r => r.shop === shop && r.type === 'in' && r.product === c.p.name && (!date || r.date <= date))) continue;
+      const n = Math.min(...got.map(a => sumQ(a, e => e.left))); if (!(n > 0)) continue;
+      got.forEach((a, k) => { let need = n; for (const e of a) { const t = clampQty(Math.min(e.left, need)); e.left = clampQty(e.left - t); need = clampQty(need - t); if (k === 0) add(shop, date, c.p, t, e.batch); } });
+    }
+  }
+  for (const e of ents) {
+    if (!(e.left > 0)) continue;
+    if (e.p) add(e.shop, e.date, e.p, e.left, e.batch); else untracked.set(e.label, clampQty((untracked.get(e.label) || 0) + e.left));
+  }
+  const groups = [...out.values()].sort((x, y) => cmp(x.shop === sid ? '' : x.shop, y.shop === sid ? '' : y.shop) || cmp(x.date, y.date))
+    .map(g => ({ shop: g.shop, date: g.date, items: [...g.m.values()].map(x => Object.keys(x.pref).length ? x : { product: x.product, quantity: x.quantity }).sort((a, b) => productOrder(a.product, b.product)) }));
+  return { groups, items: groups.flatMap(g => g.items), skipped, untracked, otherWh, header: hi >= 0, dateCol: hi >= 0 && col.date >= 0, shopCol: hi >= 0 && (col.wh >= 0 || col.shop >= 0) };
 }
 const shopImportId = (sid, type, date, product) => `imp-${type}-${sid}-${date}-${productCodeOf(product)}`;
 function shopImportRecords(sid, type, date, items) {
   const who = myName(), at = nowIso(), old = new Map(data.shops.filter(r => r.shop === sid && r.type === type && r.date === date && String(r.id).startsWith(`imp-${type}-${sid}-${date}-`)).map(r => [r.id, r]));
-  const recs = items.map(x => { const id = shopImportId(sid, type, date, x.product), o = old.get(id); return o ? { ...o, product: x.product, quantity: x.quantity, ...stampEdit() } : { id, shop: sid, type, date, product: x.product, quantity: x.quantity, batch: '', note: '批次匯入', seq: nextSeq(), by: who, at }; });
+  const recs = items.map(x => {
+    const id = shopImportId(sid, type, date, x.product), o = old.get(id), pref = x.pref && Object.keys(x.pref).length ? x.pref : undefined;
+    if (o) { const { pref: _drop, ...rest } = o; return { ...rest, product: x.product, quantity: x.quantity, ...(pref ? { pref } : {}), ...stampEdit() }; }
+    return { id, shop: sid, type, date, product: x.product, quantity: x.quantity, batch: '', ...(pref ? { pref } : {}), note: '批次匯入', seq: nextSeq(), by: who, at };
+  });
   const keep = new Set(recs.map(r => r.id));
   return { recs, removes: [...old.keys()].filter(id => !keep.has(id)), replaced: old.size };
 }
+// 讀檔案：Excel（.xlsx／.xls，第一個有資料的工作表）或 CSV／文字檔（UTF-8，讀起來是亂碼就改用 Big5）→ 轉成用 Tab 分隔的文字（格子裡的換行改成空白）
+async function readTableFile(file) {
+  const nm = (file.name || '').toLowerCase();
+  if (/\.(xlsx|xlsm|xls|ods)$/.test(nm)) {
+    const XLSX = await loadXLSX(), wb = XLSX.read(await file.arrayBuffer(), { type: 'array' });
+    const ws = wb.SheetNames.map(n => wb.Sheets[n]).find(w => w && w['!ref']) || wb.Sheets[wb.SheetNames[0]];
+    return XLSX.utils.sheet_to_json(ws, { header: 1, raw: true, defval: '', blankrows: false }).map(r => r.map(c => String(c ?? '').replace(/[\t\r\n]+/g, ' ')).join('\t')).join('\n');
+  }
+  const buf = await file.arrayBuffer();
+  let t = new TextDecoder('utf-8').decode(buf);
+  if (t.includes('\ufffd')) { try { t = new TextDecoder('big5').decode(buf); } catch (e) {} }
+  return t.replace(/^\ufeff/, '');
+}
+const prefText = pref => pref ? Object.entries(pref).map(([b, q]) => `${b}×${fmt(q)}`).join('、') : '';
 async function openShopImport(sid) {
   if (!can(shopPerm(sid))) return;
-  const name = shopName(sid);
-  const pr = modal({ title: `${name}門市：批次匯入銷售／報廢`, ok: '匯入', wide: true,
-    html: `<p class="modal-note">從 Excel 或 POS 報表<strong>直接複製貼上</strong>：每一行一個品項，要有<strong>品號或品名</strong>和<strong>數量</strong>（其他欄位沒關係，數量取那一行最後一個數字；標題列、合計列會自動略過）。同一天、同一類別再匯入一次，會<strong>取代</strong>上次匯入的數字；手動登錄的不受影響。批號不用填，照先到期先扣。</p>
-      <div class="form-grid"><div class="field"><label for="si-date">日期</label><input id="si-date" type="date" value="${TODAY()}"></div><div class="field"><label for="si-type">類別</label><select id="si-type"><option value="sale">銷售</option><option value="waste">報廢</option></select></div></div>
-      <div class="field"><label for="si-text">貼上資料</label><textarea id="si-text" rows="8" placeholder="例如：&#10;CK-01	6原	5&#10;CK-01|YB-86	6原|天蠍烙(閃耀)	3&#10;生巧	2"></textarea></div>
+  const name = shopName(sid), whNote = SHOPS.map(x => `${x.pos}＝${x.name}`).join('、');
+  const pr = modal({ title: `${name}門市：匯入銷售／報廢`, ok: '匯入', wide: true,
+    html: `<p class="modal-note"><strong>選擇檔案</strong>（POS 銷售明細等 Excel .xls／.xlsx 或 CSV）或從 Excel <strong>直接複製貼上</strong>。有標題列就照欄位讀：<strong>品號</strong>（或品名）、<strong>數量</strong>；有<strong>日期</strong>欄照每一列的日期分開匯入；有<strong>倉庫</strong>欄照代號分門市（${esc(whNote)}，其他倉庫不匯入）；有<strong>批號</strong>欄就先扣那個批號，門市沒有那個批號才照先到期先扣。不在產品清單的（運費、蠟燭…）不匯入。同一天、同一類別再匯入一次會<strong>取代</strong>上次匯入的數字；手動登錄的不受影響。</p>
+      <div class="form-grid"><div class="field"><label for="si-date">日期（檔案裡沒有日期欄時用）</label><input id="si-date" type="date" value="${TODAY()}"></div><div class="field"><label for="si-type">類別</label><select id="si-type"><option value="sale">銷售</option><option value="waste">報廢</option></select></div><div class="field span2"><label for="si-file">選擇檔案</label><input id="si-file" type="file" accept=".xlsx,.xls,.xlsm,.ods,.csv,.txt,text/csv,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet,application/vnd.ms-excel"></div></div>
+      <label id="si-allrow" class="tog" for="si-all" hidden><input id="si-all" type="checkbox" checked> <span id="si-alltext">同時匯入其他門市</span></label>
+      <div class="field"><label for="si-text">或貼上資料（選了檔案會自動帶進來，可以再改）</label><textarea id="si-text" rows="6" wrap="off" placeholder="例如：&#10;品號	品名	數量&#10;CK-01	6原	5&#10;CK-01|YB-86	6原|天蠍烙(閃耀)	3"></textarea></div>
       <div id="si-preview"></div><p class="modal-error" hidden></p>`,
     collect: b => {
-      const date = b.querySelector('#si-date').value, type = b.querySelector('#si-type').value, r = parseShopPaste(b.querySelector('#si-text').value);
-      if (!isDate(date)) throw Error('請選日期');
-      if (!r.items.length) throw Error('沒有對到任何產品和數量，請確認貼上的內容有品號（或品名）和數量');
-      return { date, type, items: r.items };
+      const date = b.querySelector('#si-date').value, type = b.querySelector('#si-type').value, r = parseShopPaste(b.querySelector('#si-text').value, sid), all = b.querySelector('#si-all').checked;
+      const gs = r.groups.filter(g => g.shop === sid || (all && can(shopPerm(g.shop))));
+      if (!gs.length) throw Error(r.items.length ? `檔案裡沒有${name}的資料（倉庫代號 ${SHOPS.find(x => x.id === sid).pos}）` : '沒有對到任何產品和數量，請確認內容有品號（或品名）和數量');
+      if (!r.dateCol && !isDate(date)) throw Error('請選日期');
+      return { type, groups: gs.map(g => ({ shop: g.shop, date: g.date || date, items: g.items })) };
     } });
   const body = $('modalBody'), upd = () => {
-    const date = body.querySelector('#si-date').value, type = body.querySelector('#si-type').value, r = parseShopPaste(body.querySelector('#si-text').value), box = body.querySelector('#si-preview');
-    if (!r.items.length && !r.skipped.length) { box.innerHTML = ''; return; }
-    const { recs, removes, replaced } = isDate(date) ? shopImportRecords(sid, type, date, r.items) : { recs: [], removes: [], replaced: 0 };
-    const list = isDate(date) ? [...data.shops.filter(x => !removes.includes(x.id) && !recs.some(y => y.id === x.id)), ...recs] : data.shops, L = shopLedger(sid, list);
-    const rows = r.items.map(x => { const rec = recs.find(y => y.product === x.product), o = rec && L.outs.get(rec.id); return `<tr>${td(`<strong>${esc(x.product)}</strong>`)}<td class="num">${fmt(x.quantity)}</td>${td(esc(o ? shopPartsText(o.parts) || '—' : '—'))}<td class="num">${o && o.short ? badge(fmt(o.short), 'bad') : '—'}</td></tr>`; });
-    const short = sumQ(recs, rec => (L.outs.get(rec.id) || {}).short || 0);
-    box.innerHTML = `<div class="notice${short || r.skipped.length ? ' warning' : ''}">對到 ${r.items.length} 個品項、共 ${fmt(sumQ(r.items))} 個${replaced ? `；會取代 ${date} 上次匯入的 ${replaced} 筆` : ''}${short ? `；有 ${fmt(short)} 個庫存不夠扣（缺口${type === 'sale' ? '，過了可販售期的不能銷售' : ''}）` : ''}${r.skipped.length ? `；略過 ${r.skipped.length} 行（沒有對到產品或數量）：${esc(r.skipped.slice(0, 3).join('｜'))}${r.skipped.length > 3 ? '…' : ''}` : ''}</div><div class="table-scroll">${table(['產品', '數量#', '預估扣除（先到期先扣）', '缺口#'], rows, '')}</div>`;
+    const date = body.querySelector('#si-date').value, type = body.querySelector('#si-type').value, r = parseShopPaste(body.querySelector('#si-text').value, sid), box = body.querySelector('#si-preview');
+    const others = [...new Set(r.groups.map(g => g.shop))].filter(x => x !== sid && can(shopPerm(x))), allRow = body.querySelector('#si-allrow');
+    allRow.hidden = !others.length; body.querySelector('#si-alltext').textContent = `同時匯入其他門市（${others.map(shopName).join('、')}）`;
+    const all = body.querySelector('#si-all').checked;
+    if (!r.items.length && !r.skipped.length && !r.untracked.size && !r.otherWh.size) { box.innerHTML = ''; return; }
+    const gs = r.groups.filter(g => g.shop === sid || (all && others.includes(g.shop))).map(g => ({ shop: g.shop, date: g.date || date, items: g.items })).filter(g => isDate(g.date));
+    let list = data.shops; const done = [];
+    for (const g of gs) { const x = shopImportRecords(g.shop, type, g.date, g.items); list = [...list.filter(y => !x.removes.includes(y.id) && !x.recs.some(z => z.id === y.id)), ...x.recs]; done.push({ ...g, ...x }); }
+    const Ls = new Map([...new Set(done.map(g => g.shop))].map(x => [x, shopLedger(x, list)])), outOf = (g, rec) => rec && Ls.get(g.shop).outs.get(rec.id);
+    const short = sumQ(done.flatMap(g => g.recs.map(rec => (outOf(g, rec) || {}).short || 0)), v => v), replaced = sumQ(done, g => g.replaced), multi = new Set(done.map(g => g.shop)).size > 1;
+    const rows = done.flatMap(g => g.items.map(x => { const rec = g.recs.find(y => y.product === x.product), o = outOf(g, rec); return `<tr>${multi ? td(esc(shopName(g.shop))) : ''}${tdm(g.date)}${td(`<strong>${esc(x.product)}</strong>`)}<td class="num">${fmt(x.quantity)}</td>${tdm(prefText(x.pref) || '—')}${td(esc(o ? shopPartsText(o.parts) || '—' : '—'))}<td class="num">${o && o.short ? badge(fmt(o.short), 'bad') : '—'}</td></tr>`; }));
+    const perShop = [...new Set(done.map(g => g.shop))].map(x => `${shopName(x)} ${fmt(sumQ(done.filter(g => g.shop === x).flatMap(g => g.items)))} 個`).join('、');
+    const wh = [...r.otherWh.entries()].map(([k, n]) => `${k}（${n} 列）`).join('、'), un = [...r.untracked.keys()];
+    const dates = [...new Set(done.map(g => g.date))];
+    box.innerHTML = `<div class="notice${short || r.skipped.length ? ' warning' : ''}">${r.dateCol ? `檔案裡的日期：${esc(dates.map(shortDate).join('、') || '—')}。` : ''}會匯入 ${done.reduce((s, g) => s + g.items.length, 0)} 筆${multi || r.shopCol ? `：${esc(perShop)}` : `、共 ${fmt(sumQ(done.flatMap(g => g.items)))} 個`}${replaced ? `；會取代上次匯入的 ${replaced} 筆` : ''}${short ? `；有 ${fmt(short)} 個庫存不夠扣（缺口${type === 'sale' ? '，過了可販售期的不能銷售' : ''}）` : ''}${r.skipped.length ? `；略過 ${r.skipped.length} 行（數量或日期讀不到）：${esc(r.skipped.slice(0, 3).join('｜'))}${r.skipped.length > 3 ? '…' : ''}` : ''}</div>
+      ${wh || un.length ? `<p class="modal-note">${wh ? `不是門市的倉庫代號沒有匯入：${esc(wh)}。` : ''}${un.length ? `不在產品清單、沒有匯入的 ${un.length} 種：${esc(un.slice(0, 8).join('、'))}${un.length > 8 ? '…' : ''}` : ''}</p>` : ''}
+      <div class="table-scroll">${table([...(multi ? ['門市'] : []), '日期', '產品', '數量#', 'POS 批號', '預估扣除（批號優先，再先到期先扣）', '缺口#'], rows, '')}</div>`;
   };
   for (const id of ['si-date', 'si-type', 'si-text']) body.querySelector('#' + id).addEventListener('input', upd);
-  body.querySelector('#si-type').addEventListener('change', upd);
+  for (const id of ['si-type', 'si-all']) body.querySelector('#' + id).addEventListener('change', upd);
+  body.querySelector('#si-file').addEventListener('change', async e => {
+    const f = e.target.files && e.target.files[0]; if (!f) return;
+    try { body.querySelector('#si-text').value = await readTableFile(f); upd(); toast(`已讀入「${f.name}」，請看下面的預覽`, false, 3000); }
+    catch (err) { toast('檔案讀取失敗：' + (err && err.message || err), true, 7000); }
+  });
   const res = await pr;
-  if (!res || !can(shopPerm(sid))) return;
+  if (!res) return;
   act(() => {
-    const { recs, removes } = shopImportRecords(sid, res.type, res.date, res.items);
-    if (removes.length) FEStore.removeMany('shop', removes);
-    FEStore.saveMany('shop', recs);
-    const L = shopLedger(sid), short = sumQ(recs, r => (L.outs.get(r.id) || {}).short || 0);
-    toast(`已匯入${name}門市 ${res.date} 的${SHOP_TYPES[res.type]}：${recs.length} 個品項、共 ${fmt(sumQ(recs))} 個${removes.length ? `（移除上次匯入、這次沒有的 ${removes.length} 項）` : ''}${short ? `；有 ${fmt(short)} 個庫存不夠扣，列為缺口` : ''}`, !!short, short ? 8000 : 5000);
+    const sum = new Map();
+    for (const g of res.groups) {
+      if (!can(shopPerm(g.shop))) continue;
+      const { recs, removes } = shopImportRecords(g.shop, res.type, g.date, g.items);
+      if (removes.length) FEStore.removeMany('shop', removes);
+      FEStore.saveMany('shop', recs);
+      const x = sum.get(g.shop) || { n: 0, q: 0, rm: 0, ids: [], dates: [] }; x.n += recs.length; x.q += sumQ(recs); x.rm += removes.length; x.ids.push(...recs.map(r => r.id)); x.dates.push(g.date); sum.set(g.shop, x);
+    }
+    let short = 0;
+    const msg = [...sum.entries()].map(([shop, x]) => { const L = shopLedger(shop), sh = sumQ(x.ids, id => (L.outs.get(id) || {}).short || 0); short += sh; const ds = [...new Set(x.dates)].sort(); return `${shopName(shop)} ${ds.length > 1 ? `${shortDate(ds[0])}～${shortDate(ds[ds.length - 1])}` : shortDate(ds[0])} ${x.n} 筆、${fmt(x.q)} 個${x.rm ? `（移除上次匯入、這次沒有的 ${x.rm} 筆）` : ''}${sh ? `，缺口 ${fmt(sh)} 個` : ''}`; }).join('；');
+    toast(`已匯入${SHOP_TYPES[res.type]}：${msg}`, !!short, short ? 9000 : 6000);
   });
 }
 // 可販售期設定（只用在門市：入貨那天算第 1 天）
