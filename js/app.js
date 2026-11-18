@@ -1044,7 +1044,7 @@ function shopSectionHtml(s) {
   return `<section id="shop-${id}" class="section">
     <div class="stabs" id="stabs-${id}" role="tablist" aria-label="${n}門市分頁"><button type="button" role="tab" data-stab="recv">門市入貨確認</button><button type="button" role="tab" data-stab="entry">入貨／銷售／報廢匯入</button><button type="button" role="tab" data-stab="stock">門市庫存</button></div>
     <div class="shop-pane" data-pane="recv">
-    <div class="panel"><div class="panel-head"><div><h2>${n}門市入貨確認</h2><p id="rcvInfo-${id}"></p></div><div class="toolbar"><button type="button" class="btn small need-storeout" data-action="store-out" title="讀揀貨總表的排單表，把各門市的出庫量帶入成入貨（批號自動推定）">從揀貨總表帶入今天的入貨</button><input id="rcvDate-${id}" class="search" type="date" aria-label="入貨日期"></div></div><div id="rcvList-${id}" class="table-scroll"></div></div>
+    <div class="panel"><div class="panel-head"><div><h2>${n}門市入貨確認</h2><p id="rcvInfo-${id}"></p></div><div class="toolbar"><button type="button" class="btn small primary need-shop_${id}" data-action="ocr-slip" data-shop="${id}" title="用手機拍門市出庫單，自動讀品號、數量、製造日期，換成批號">拍出庫單辨識</button><input type="file" id="ocrFile-${id}" accept="image/*" capture="environment" hidden><button type="button" class="btn small need-storeout" data-action="store-out" title="讀揀貨總表的排單表，把各門市的出庫量帶入成入貨（批號自動推定）">從揀貨總表帶入今天的入貨</button><input id="rcvDate-${id}" class="search" type="date" aria-label="入貨日期"></div></div><div id="rcvList-${id}" class="table-scroll"></div></div>
     </div>
     <div class="shop-pane" data-pane="entry">
     <div class="panel form-area need-shop_${id}"><div class="panel-head"><div><h2>登錄${n}門市入貨／銷售／報廢</h2><p>銷售、報廢可以按右邊「批次匯入」從 Excel／POS 報表一次貼上；入貨會從揀貨總表帶入，批號可以不填（照總公司當天的出貨扣批自動推定）。</p></div><div class="toolbar"><button type="button" class="btn small primary" data-action="shop-import" data-shop="${id}">批次匯入銷售／報廢</button></div></div><div class="panel-body"><form id="shopForm-${id}" class="form-grid" novalidate>
@@ -1334,6 +1334,121 @@ function rcvClear(sid, id) {
   const r = data.shops.find(x => x.id === id && x.shop === sid); if (!r) return;
   delete rcvDraft[r.id];
   act(() => { const { scan, ...rest } = r; FEStore.save('shop', { ...rest, batch: '', ...stampEdit() }); toast(`已清除 ${r.product} 的確認，改回自動推定`); });
+}
+/* ---------- 拍門市出庫單辨識 ----------
+   用手機拍（或選）門市出庫單的照片 → 在瀏覽器裡用 Tesseract.js（繁體中文＋英數字，第一次會下載辨識資料約 30MB，之後留在手機裡）辨識文字
+   → 每一行找品號（對照 App 的品號）、數量（2.00）、製造日期（11月13日）→ 批號＝品號碼＋製造日期（現貨批號就是用轉現貨那天編的）
+   → 預覽可以修改 → 套用：同一個品號各製造日期的數量存成那天入貨的「已確認」。照片只在手機上辨識，不會上傳。 */
+let ocrLibPromise = null;
+function loadOcr() {
+  if (window.Tesseract) return Promise.resolve(window.Tesseract);
+  if (!ocrLibPromise) ocrLibPromise = new Promise((res, rej) => { const sc = document.createElement('script'); sc.src = 'https://cdn.jsdelivr.net/npm/tesseract.js@5.1.1/dist/tesseract.min.js'; sc.onload = () => window.Tesseract ? res(window.Tesseract) : rej(Error('辨識元件載入失敗')); sc.onerror = () => { ocrLibPromise = null; rej(Error('辨識元件載入失敗，請確認網路')); }; document.head.appendChild(sc); });
+  return ocrLibPromise;
+}
+// 照片前處理：放大或縮小到適合辨識的寬度、轉灰階、加強對比
+async function ocrPrepare(file) {
+  const url = URL.createObjectURL(file);
+  try {
+    const img = await new Promise((res, rej) => { const i = new Image(); i.onload = () => res(i); i.onerror = () => rej(Error('讀不到這張照片')); i.src = url; });
+    const k = Math.min(2.5, Math.max(0.4, 1300 / img.width)), c = document.createElement('canvas'); c.width = Math.round(img.width * k); c.height = Math.round(img.height * k);
+    const g = c.getContext('2d'); g.imageSmoothingQuality = 'high'; g.drawImage(img, 0, 0, c.width, c.height);
+    const d = g.getImageData(0, 0, c.width, c.height), px = d.data;
+    for (let i = 0; i < px.length; i += 4) { const y = 0.299 * px[i] + 0.587 * px[i + 1] + 0.114 * px[i + 2], v = y > 160 ? 255 : y < 100 ? 0 : (y - 100) * 4.25; px[i] = px[i + 1] = px[i + 2] = v; }
+    g.putImageData(d, 0, 0); return c;
+  } finally { URL.revokeObjectURL(url); }
+}
+// 從辨識出的文字讀出日期與每一行（品號、數量、製造日期）
+function parseSlip(text, fallbackDate, hasRecs = () => true) {
+  const codes = [...new Set(data.products.filter(p => !p.virtual).map(p => productCodeOf(p.name).split('|')[0]))].sort((a, b) => b.length - a.length);
+  const res = codes.map(c => [c, new RegExp(c.replace(/[-]/g, '-?'))]);
+  const T = String(text || '').replace(/[－—–]/g, '-');
+  // 日期：表頭「日期 2026/11/13」或單號「…20261113010」；年份讀錯（差很多）就用今年；那天沒有入貨就用預設的入貨日
+  const fix = (y, m, d) => { const now = TODAY(); let ds = `${y}-${String(m).padStart(2, '0')}-${String(d).padStart(2, '0')}`; if (!isDate(ds)) return ''; if (Math.abs(dayDiff(now, ds)) > 60) { const alt = `${now.slice(0, 4)}-${ds.slice(5)}`; ds = isDate(alt) && Math.abs(dayDiff(now, alt)) <= 60 ? alt : ''; } return ds; };
+  const cands = [];
+  for (const m of T.matchAll(/(20\d{2})\s*[\/.\-年]\s*(\d{1,2})\s*[\/.\-月]\s*(\d{1,2})/g)) cands.push(fix(m[1], Number(m[2]), Number(m[3])));
+  for (const m of T.matchAll(/[A-Z]{0,3}(20\d{2})(\d{2})(\d{2})\d{3}/g)) cands.push(fix(m[1], Number(m[2]), Number(m[3])));
+  const okDates = cands.filter(Boolean);
+  const date = okDates.find(hasRecs) || (hasRecs(fallbackDate) ? fallbackDate : okDates[0]) || fallbackDate;
+  // 品號比對：先完全一樣；再校正常見錯字（O→0、L/I→1、S→5、B→8、Z→2、G→6）；再從那天的入貨品項找只差一個字、而且只有一個的
+  const norm = c => c.replace(/-/g, '');
+  const dayCodes = [...new Set(typeof window.dayCodesOf === 'function' ? window.dayCodesOf(date) : [])];
+  const lev = (x, y) => { const d = Array.from({ length: x.length + 1 }, (_, i) => [i]); for (let j = 1; j <= y.length; j++) d[0][j] = j; for (let i = 1; i <= x.length; i++) for (let j = 1; j <= y.length; j++) d[i][j] = Math.min(d[i - 1][j] + 1, d[i][j - 1] + 1, d[i - 1][j - 1] + (x[i - 1] === y[j - 1] ? 0 : 1)); return d[x.length][y.length]; };
+  const fixDigits = t => t.slice(0, 2) + t.slice(2).replace(/[OQD]/g, '0').replace(/[LIJ|!]/g, '1').replace(/S/g, '5').replace(/B/g, '8').replace(/Z/g, '2').replace(/G/g, '6');
+  const lines = [];
+  for (const raw of T.split(/\n/)) {
+    const L = raw.toUpperCase().replace(/[|｜]/g, ' '), flat = L.replace(/\s+/g, '');
+    const dm = raw.match(/(\d{1,2})\s*[月HB目]\s*(\d{1,2})\s*[日HB目曰]?/), qm = raw.match(/(\d{1,4})[.,](\d{1,2})(?!\d)/);
+    let code = '', how = 'exact';
+    const hit = res.find(([, re]) => re.test(flat)); if (hit) code = hit[0];
+    if (!code && (dm || qm)) {
+      const pre = (raw.split(/[\u3400-\u9fff|｜]/)[0] || '').toUpperCase().replace(/[^A-Z0-9-]/g, ''), tok = fixDigits(pre.replace(/-/g, ''));
+      if (tok.length >= 3) {
+        const exact = codes.find(c => norm(c) === tok);
+        if (exact) { code = exact; how = 'fixed'; }
+        else { const near = list => list.filter(c => lev(tok, norm(c)) <= 1), n1 = near(dayCodes), pick = n1.length === 1 ? n1 : (n1.length ? [] : near(codes)); if (pick.length === 1) { code = pick[0]; how = 'guess'; } else { code = pre || tok; how = 'unknown'; } }
+      }
+    }
+    if (!code) continue;
+    let mfg = '';
+    if (dm) { let y = Number(date.slice(0, 4)); const mo = Number(dm[1]); if (mo > Number(date.slice(5, 7)) + 1) y--; const ds = `${y}-${String(mo).padStart(2, '0')}-${String(Number(dm[2])).padStart(2, '0')}`; if (isDate(ds)) mfg = ds; }
+    lines.push({ code, qty: qm ? Number(qm[1]) : 0, mfg, how, raw: raw.trim().slice(0, 60) });
+  }
+  // 刪去法：讀不清楚的行，那天的入貨裡還沒對到、字形接近（差 2 個字以內）而且只有一個的品號，就猜它
+  const used = new Set(lines.filter(x => x.how !== 'unknown').map(x => x.code));
+  for (const x of lines.filter(x => x.how === 'unknown')) { const tok = fixDigits(x.code.replace(/[^A-Z0-9]/g, '')), left = dayCodes.filter(c => !used.has(c) && lev(tok, norm(c)) <= 2); if (left.length === 1) { x.code = left[0]; x.how = 'guess'; used.add(left[0]); } }
+  return { date, lines };
+}
+async function ocrSlip(sid, file) {
+  if (!can(shopPerm(sid)) || !file) return;
+  toast('準備辨識…（第一次會下載辨識資料，約 30MB，請稍等）', false, 120000);
+  let text = '';
+  try {
+    const T = await loadOcr(), canvas = await ocrPrepare(file);
+    const w = await T.createWorker('chi_tra+eng', 1, { logger: m => { if (m.status === 'recognizing text') toast(`辨識中… ${Math.round((m.progress || 0) * 100)}%`, false, 120000); else if (/load|download/i.test(m.status || '')) toast(`下載辨識資料… ${Math.round((m.progress || 0) * 100)}%（只有第一次）`, false, 120000); } });
+    try { await w.setParameters({ preserve_interword_spaces: '1' }); text = (await w.recognize(canvas)).data.text || ''; } finally { await w.terminate(); }
+  } catch (e) { toast('辨識失敗：' + (e && e.message || e), true, 8000); return; }
+  toast('辨識完成，請核對', false, 2500);
+  window.dayCodesOf = d => data.shops.filter(r => r.shop === sid && r.type === 'in' && r.date === d).map(r => productCodeOf(r.product).split('|')[0]);
+  const slip = parseSlip(text, rcvDay(sid), d => data.shops.some(r => r.shop === sid && r.type === 'in' && r.date === d));
+  await ocrPreview(sid, slip, text);
+}
+// 預覽：每行可以改品號、數量、製造日期；對到那天的哪一筆入貨、換成哪個批號
+async function ocrPreview(sid, slip, text) {
+  const recsOn = d => data.shops.filter(r => r.shop === sid && r.type === 'in' && r.date === d);
+  const optsFor = (d, code) => { const rs = recsOn(d), exact = rs.filter(r => productCodeOf(r.product) === code), base = rs.filter(r => productCodeOf(r.product).split('|')[0] === code.split('|')[0]); return exact.length ? [...exact, ...base.filter(r => !exact.includes(r))] : base; };
+  const row = (x, i) => `<tr data-ol="${i}"><td><input class="ol-code" value="${esc(x.code)}" maxlength="30" style="width:110px;text-transform:uppercase">${x.how === 'guess' ? `<br><span class="pill due" title="讀到「${esc(x.raw.slice(0, 14))}」，照那天的入貨猜是這個">猜的，請確認</span>` : x.how === 'unknown' ? `<br><span class="pill bad" title="讀到「${esc(x.raw.slice(0, 20))}」">讀不清楚，請改品號</span>` : ''}</td><td><input class="ol-qty" type="number" min="0" step="1" value="${esc(x.qty)}" style="width:64px"></td><td><input class="ol-mfg" type="date" value="${esc(x.mfg)}"></td><td class="ol-out"></td></tr>`;
+  const html = `<p class="modal-note">核對辨識結果（照片只在這台手機辨識，不會上傳）。每一行可以改品號、數量、製造日期；批號＝品號碼＋製造日期。按「套用」會把同一個品號各製造日期的數量，存成這天入貨的「已確認」。</p>
+    <div class="field"><label for="ol-date">出庫單日期（入貨日）</label><input id="ol-date" type="date" value="${esc(slip.date)}"></div>
+    <div class="table-scroll"><table class="data-table"><thead><tr><th>品號</th><th class="num">數量</th><th>製造日期</th><th>批號／對到的入貨</th></tr></thead><tbody id="ol-body">${slip.lines.map(row).join('') || '<tr><td colspan="4" class="who">沒有讀到任何品號，請再拍清楚一點（整張單攤平、光線充足、不要反光）</td></tr>'}</tbody></table></div>
+    <details style="margin-top:10px"><summary class="who">看辨識出的原始文字</summary><pre style="white-space:pre-wrap;font-size:11px">${esc(text)}</pre></details><p class="modal-error" hidden></p>`;
+  const pr = modal({ title: `${shopName(sid)}門市：出庫單辨識結果`, ok: '套用', wide: true, html,
+    collect: b => {
+      const date = b.querySelector('#ol-date').value; if (!isDate(date)) throw Error('請填出庫單日期');
+      const rows = [...b.querySelectorAll('#ol-body tr[data-ol]')].map(tr => ({ code: cleanBatch(tr.querySelector('.ol-code').value).replace(/^([A-Z]{2})(\d)/, '$1-$2'), qty: Number(tr.querySelector('.ol-qty').value), mfg: tr.querySelector('.ol-mfg').value })).filter(x => x.code && x.qty > 0);
+      if (!rows.length) throw Error('沒有可以套用的行');
+      for (const x of rows) if (!isDate(x.mfg)) throw Error(`${x.code} 的製造日期沒填`);
+      return { date, rows };
+    } });
+  const body = $('modalBody'), upd = () => {
+    const d = body.querySelector('#ol-date').value;
+    body.querySelectorAll('#ol-body tr[data-ol]').forEach(tr => {
+      const code = cleanBatch(tr.querySelector('.ol-code').value).replace(/^([A-Z]{2})(\d)/, '$1-$2'), mfg = tr.querySelector('.ol-mfg').value, out = tr.querySelector('.ol-out'), o = isDate(d) ? optsFor(d, code) : [];
+      const b = o[0] && isDate(mfg) ? makeBatch(o[0].product, mfg) : '', cands = o[0] ? hqCandidates(o[0].product, shopFrom(o[0])) : [];
+      out.innerHTML = !o.length ? `<span class="pill bad">這天的入貨沒有 ${esc(code)}</span>` : `<span class="mono">${esc(b || '—')}</span> → ${esc(o[0].product)}${o.length > 1 ? ` <span class="who">（還有 ${o.length - 1} 個同品號的品項，會用這一個）</span>` : ''}${b && cands.length && !cands.includes(b) ? ' <span class="pill due">總公司那天沒有這個批號，請確認製造日期</span>' : ''}`;
+    });
+  };
+  body.addEventListener('input', upd); upd();
+  const res = await pr; if (!res) return;
+  // 依入貨品項分組：{ 批號: 數量 }
+  const by = new Map(), miss = [];
+  for (const x of res.rows) { const r = optsFor(res.date, x.code)[0]; if (!r) { miss.push(x.code); continue; } const b = makeBatch(r.product, x.mfg); if (!b) { miss.push(x.code); continue; } const m = by.get(r.id) || { r, scan: {} }; m.scan[b] = clampQty((m.scan[b] || 0) + x.qty); by.set(r.id, m); }
+  const warn = [];
+  act(() => {
+    const recs = [...by.values()].map(({ r, scan }) => { const sum = sumQ(Object.values(scan), v => v); if (Math.abs(sum - r.quantity) > 1e-7) warn.push(`${productCodeOf(r.product)} 出庫單 ${fmt(sum)}／入貨 ${fmt(r.quantity)}`); const { batch: _b, ...rest } = r; return { ...rest, batch: '', scan, ...stampEdit() }; });
+    if (recs.length) FEStore.saveMany('shop', recs);
+    rcvDate[sid] = res.date;
+  });
+  toast(`已套用 ${by.size} 個品項的批號${miss.length ? `；對不到：${miss.join('、')}` : ''}${warn.length ? `；數量跟入貨不一樣（以出庫單為準，多的部分不算）：${warn.join('、')}` : ''}`, !!(miss.length || warn.length), miss.length || warn.length ? 10000 : 4000);
 }
 /* ---------- 門市批次匯入（銷售／報廢） ----------
    從 Excel、POS 報表複製貼上：每一行一個品項，自動找「品號或品名」和「數量」（數量取那一行最後一個數字；標題列、合計列沒有對到產品的會略過）。
@@ -1833,6 +1948,7 @@ async function handleAction(el) {
   if (a === 'audit-csv') return auditCsv();
   if (a === 'rcv-pick') return rcvPick(el.dataset.shop, id, el.dataset.batch);
   if (a === 'rcv-confirm') return rcvConfirm(el.dataset.shop, id, el);
+  if (a === 'ocr-slip') { const f = $('ocrFile-' + el.dataset.shop); if (f) { f.value = ''; f.click(); } return; }
   if (a === 'rcv-clear') return rcvClear(el.dataset.shop, id);
   if (a === 'shop-delete') return deleteShopRec(el.dataset.shop, id);
   if (a === 'shop-batch') return editShopBatch(el.dataset.shop, id);
@@ -1885,6 +2001,7 @@ function bind() {
     for (const f of ['shopFilter-', 'shopRecFilter-']) $(f + id).addEventListener('input', scheduleRender);
     $('shopSeg-' + id).addEventListener('click', e => { const b = e.target.closest('[data-smode]'); if (!b) return; shopMode[id] = b.dataset.smode; scheduleRender(); });
     $('stabs-' + id).addEventListener('click', e => { const b = e.target.closest('[data-stab]'); if (b) setShopTab(id, b.dataset.stab); });
+    $('ocrFile-' + id).addEventListener('change', e => { const f = e.target.files && e.target.files[0]; if (f) ocrSlip(id, f); });
     $('rcvDate-' + id).addEventListener('change', e => { if (isDate(e.target.value)) { rcvDate[id] = e.target.value; scheduleRender(); } });
   }
   $('settingsForm').addEventListener('submit', e => { e.preventDefault(); if (!can('setting')) return; const mw = Number($('semiWarn').value), sh = Number($('defaultShelf').value), k = Number($('stockDays').value), kw = Number($('stockWarn').value); if (!Number.isInteger(mw) || mw < 1 || mw > 365 || !Number.isInteger(sh) || sh < 0 || sh > 36500) { toast('請填寫有效的半成品警示天數（1～365）與保存天數（整數）', true); return; } if (!Number.isInteger(k) || k < 1 || k > 365 || !Number.isInteger(kw) || kw < 0 || kw > 60) { toast('現貨可放天數要是 1～365、現貨提醒天數要是 0～60 的整數', true); return; } act(() => { FEStore.save('settings', { id: 'main', warnDays: data.settings.warnDays, defaultShelf: sh, stockDays: k, stockWarn: kw, semiWarn: mw }); toast(`系統設定已儲存：現貨可放 ${k} 天、剩 ${kw} 天內提醒；半成品剩 ${mw} 天內警示`); }); });
