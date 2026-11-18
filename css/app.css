@@ -199,6 +199,8 @@ html.auth-locked .app{display:none}
 .rq-row{display:flex;flex-wrap:wrap;align-items:center;gap:6px 10px}
 .rq{display:inline-flex;align-items:center;gap:4px;font-size:12px;border:1px solid var(--line);border-radius:8px;padding:3px 4px 3px 8px;background:var(--surface-2)}
 .rq input{width:54px;border:1px solid var(--line);border-radius:6px;padding:4px 6px;text-align:right;background:var(--surface);color:var(--ink);font-size:13px}
+.rq b{font-size:13px;color:var(--ink)}
+.rq-b{font-size:10px;color:var(--muted)}
 .rq-sum{font-size:12px;font-weight:700;color:var(--ok-fg,var(--muted))}
 .rq-sum.bad{color:var(--bad-fg)}
 /* 庫存盤點 */

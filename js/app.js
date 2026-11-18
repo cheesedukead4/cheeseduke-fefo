@@ -1280,7 +1280,8 @@ function renderReceive(sid, plan) {
     let st;
     if (!pending) { st = allAuto ? badge('自動確認（今天只出一個批號）', 'ok') : badge('已確認', 'ok'); if (allAuto) auto++; else done++; }
     else { st = cq > 0 ? badge(`已確認 ${fmt(cq)}／${fmt(r.quantity)}`, 'due') : badge('待確認', 'bad'); wait++; }
-    const chips = [...conf.map(p => `<span class="pill ok exp-chip"><span class="mono">${esc(p.batch)}</span> ×${fmt(p.qty)}${p.auto ? ' <span class="guess">自動</span>' : ''}</span>`), ...guess.map(p => `<span class="pill other exp-chip"><span class="mono">${esc(guessLabel(p))}</span> ×${fmt(p.qty)} <span class="guess">推定</span></span>`), ...unk.map(p => `<span class="pill due exp-chip">批號不明 ×${fmt(p.qty)}</span>`)].join('');
+    const md2 = b => batchMd(b) ? `${batchMd(b)} ` : '';
+    const chips = [...conf.map(p => `<span class="pill ok exp-chip">${esc(md2(p.batch))}<span class="mono">${esc(p.batch)}</span> ×${fmt(p.qty)}${p.auto ? ' <span class="guess">自動</span>' : ''}</span>`), ...guess.map(p => `<span class="pill other exp-chip">${esc(md2(p.batch))}<span class="mono">${esc(guessLabel(p))}</span> ×${fmt(p.qty)} <span class="guess">推定</span></span>`), ...unk.map(p => `<span class="pill due exp-chip">批號不明 ×${fmt(p.qty)}</span>`)].join('');
     let ops = '';
     if (edit && pending) {
       // 可以填的批號：總公司那天出的＋那天可能出的；先填「已確認＋推定」的數量
@@ -1288,13 +1289,13 @@ function renderReceive(sid, plan) {
       const pre = {}; for (const p of parts) if (p.batch && !p.unknown) pre[p.batch] = clampQty((pre[p.batch] || 0) + p.qty);
       const alt = [...new Set([...Object.keys(pre), ...shippedB, ...hqCandidates(r.product, shopFrom(r))])].sort(), dr = rcvDraft[r.id] || {};
       const val = b => b in dr ? dr[b] : (pre[b] || 0), sum = clampQty(alt.reduce((t, b) => t + (Number(val(b)) || 0), 0));
-      ops = `<div class="rq-row">${alt.map(b => `<label class="rq"><span class="mono">${esc(b)}</span><input type="number" inputmode="numeric" min="0" max="${r.quantity}" step="1" value="${esc(val(b))}" data-rq="${esc(r.id)}" data-batch="${esc(b)}" aria-label="${esc(b)} 數量"></label>`).join('')}<span class="rq-sum${Math.abs(sum - r.quantity) > 1e-7 ? ' bad' : ''}" data-rqsum="${esc(r.id)}" data-total="${r.quantity}">合計 ${fmt(sum)}／${fmt(r.quantity)}</span><button type="button" class="btn small primary" data-action="rcv-confirm" data-shop="${sid}" data-id="${esc(r.id)}" title="照左邊填的數量確認">確認</button></div>`;
+      ops = `<div class="rq-row">${alt.map(b => `<label class="rq" title="批號 ${esc(b)}${batchDate(b) ? '，製造日期 ' + batchDate(b) : ''}">${batchMd(b) ? `<b>${esc(batchMd(b))}</b> ` : ''}<span class="mono rq-b">${esc(b)}</span><input type="number" inputmode="numeric" min="0" max="${r.quantity}" step="1" value="${esc(val(b))}" data-rq="${esc(r.id)}" data-batch="${esc(b)}" aria-label="${esc(b)} 數量"></label>`).join('')}<span class="rq-sum${Math.abs(sum - r.quantity) > 1e-7 ? ' bad' : ''}" data-rqsum="${esc(r.id)}" data-total="${r.quantity}">合計 ${fmt(sum)}／${fmt(r.quantity)}</span><button type="button" class="btn small primary" data-action="rcv-confirm" data-shop="${sid}" data-id="${esc(r.id)}" title="照左邊填的數量確認">確認</button></div>`;
     }
     if (edit && manual) ops += `<button type="button" class="btn small danger" data-action="rcv-clear" data-shop="${sid}" data-id="${esc(r.id)}">清除</button>`;
     return `<tr>${td(`<strong>${esc(r.product)}</strong>`)}<td class="num">${fmt(r.quantity)}</td>${td(st)}<td class="exp-cell"><div class="exp-chips">${chips || '<span class="who">—</span>'}</div></td><td class="exp-cell">${ops}</td></tr>`;
   });
-  $('rcvInfo-' + sid).textContent = recs.length ? `${day} 入貨 ${recs.length} 項：自動確認 ${auto} 項（總公司那天這個品項只出一個批號）、門市已確認 ${done} 項、待確認 ${wait} 項（總公司出了好幾個批號）。待確認的照盒子上的批號填每個批號幾個（已先填推定的），合計對了按「確認」` : `${day} 沒有入貨紀錄`;
-  $('rcvList-' + sid).innerHTML = table(['產品', '入貨#', '狀態', '批號（綠＝已確認、灰＝推定）', '每個批號幾個 → 確認'], rows, `${day} 沒有入貨紀錄`);
+  $('rcvInfo-' + sid).textContent = recs.length ? `${day} 入貨 ${recs.length} 項：自動確認 ${auto} 項（總公司那天這個品項只出一個批號）、門市已確認 ${done} 項、待確認 ${wait} 項（總公司出了好幾個批號）。待確認的照門市出庫單的「製造日期」（或盒子上的批號）填每個日期幾個（已先填推定的），合計對了按「確認」` : `${day} 沒有入貨紀錄`;
+  $('rcvList-' + sid).innerHTML = table(['產品', '入貨#', '狀態', '批號（綠＝已確認、灰＝推定）', '每個製造日期（批號）幾個 → 確認'], rows, `${day} 沒有入貨紀錄`);
 }
 // 改數量：記到 rcvDraft，更新那一列的合計
 function rcvInput(el) {
@@ -1465,6 +1466,14 @@ const YEAR_BASE = 2024, YEAR_CODES = 'QRSTUVWXYZ'; // 2024＝Q … 2033＝Z
 const monthCode = m => MONTH_CODES[m - 1] || '';
 const yearCode = y => YEAR_CODES[y - YEAR_BASE] || '';
 const dayCode = d => d >= 1 && d <= 31 ? String(d % 10) + (d < 10 ? String(d) : String.fromCharCode(65 + d - 10)) : '';
+// 反過來：從批號讀出日期（現貨批號＝轉現貨那天＝出庫單上的「製造日期」），讀不出來回傳 ''
+function batchDate(b) {
+  b = String(b || ''); if (b.length !== 8) return '';
+  const m = MONTH_CODES.indexOf(b[2]) + 1, y = YEAR_BASE + YEAR_CODES.indexOf(b[3]), c = b[5], d = /[0-9]/.test(c) ? Number(c) : c.charCodeAt(0) - 55;
+  if (m < 1 || YEAR_CODES.indexOf(b[3]) < 0 || !(d >= 1 && d <= 31) || dayCode(d) !== b.slice(4, 6)) return '';
+  const ds = `${y}-${String(m).padStart(2, '0')}-${String(d).padStart(2, '0')}`; return isDate(ds) ? ds : '';
+}
+const batchMd = b => { const d = batchDate(b); return d ? `${Number(d.slice(5, 7))}/${Number(d.slice(8))}` : ''; };
 const batchMeta = () => FEStore.get('settings', 'batch') || {};
 const customCodes = () => { const c = batchMeta().codes; return c && typeof c === 'object' ? c : {}; };
 const BCODE_RE = /^[A-Z0-9]{4}$/;
