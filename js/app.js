@@ -311,8 +311,9 @@ function calculateLedger(asOf = '9999-12-31', st = data) {
     const allocOf = (lot, amount, tx) => ({ lotId: lot.id, pool: lot.pool, source: lot.source, product: lot.product, batch: lot.batch, manufactureDate: lot.manufactureDate, expiryDate: lot.expiryDate, entryDate: lot.entryDate, quantity: amount, ...(tx ? { tx: true } : {}) });
     const use = (lot, amount) => { lot.remaining = clampQty(lot.remaining - amount); lot.used = clampQty(lot.used + amount); lot.shipped = clampQty(lot.shipped + amount); };
     // 有匯入那天的交易明細：同一天、同一個品號第一段（例如 CA-25 和 CA-25|YC-09）的出貨一起扣，第一筆出貨時整組一次算完
-    //   ① 明細的批號：誰的庫存有那個批號就由誰扣（組合品和單品各有各的批）；庫存裡沒有或不夠的記成「批號對不上」（txMiss），不改扣別批、算在缺口
-    //   ② 明細沒寫批號、或明細比總表少的部分（txNone）才照先到期先出
+    //   ① 明細的批號：誰的庫存有那個批號就由誰扣（組合品和單品各有各的批）；庫存裡沒有或不夠的記成「批號對不上」（txMiss），
+    //      數量照樣照先到期先出改扣別批（2026-11-20 起：數量以總表為準，庫存才會跟總表一致；改扣的算客人的，標 tx、txSub，不分給門市）
+    //   ② 明細沒寫批號、或明細比總表少的部分（txNone）照先到期先出（這部分是寄門市等，分給門市推定批號）
     const gk = e.date + '|' + baseCode(x.product), pool = txPool.get(gk);
     if (pool) {
       if (txDone.has(gk)) continue;
@@ -321,11 +322,18 @@ function calculateLedger(asOf = '9999-12-31', st = data) {
       const take = (g, lot, amount, tx) => { use(lot, amount); g.remaining = clampQty(g.remaining - amount); g.allocations.push(allocOf(lot, amount, tx)); };
       for (const b of Object.keys(pool).filter(k => k !== '—').sort((p, q) => cmp(batchDate(p) || p, batchDate(q) || q))) {
         let need = pool[b];
-        for (const g of grp) for (const lot of g.elig) { if (need <= 1e-7 || g.remaining <= 1e-7) break; if (lot.remaining <= 1e-7 || lotBatchOn(lot, e.date) !== b) continue; const amount = clampQty(Math.min(need, g.remaining, lot.remaining)); take(g, lot, amount, true); need = clampQty(need - amount); }
-        for (const g of grp) { if (need <= 1e-7) break; if (g.remaining <= 1e-7) continue; const m = clampQty(Math.min(need, g.remaining)); g.remaining = clampQty(g.remaining - m); g.miss[b] = clampQty((g.miss[b] || 0) + m); need = clampQty(need - m); }
+        const free = g => clampQty(g.remaining - Object.values(g.miss).reduce((t, v) => t + v, 0)); // 扣掉已經記成批號對不上（之後要改扣）的數量
+        for (const g of grp) for (const lot of g.elig) { if (need <= 1e-7 || free(g) <= 1e-7) break; if (lot.remaining <= 1e-7 || lotBatchOn(lot, e.date) !== b) continue; const amount = clampQty(Math.min(need, free(g), lot.remaining)); take(g, lot, amount, true); need = clampQty(need - amount); }
+        for (const g of grp) { if (need <= 1e-7) break; const left = free(g); if (left <= 1e-7) continue; const m = clampQty(Math.min(need, left)); g.miss[b] = clampQty((g.miss[b] || 0) + m); need = clampQty(need - m); }
       }
-      for (const g of grp) { g.none = g.remaining; for (const lot of g.elig) { if (g.remaining <= 1e-7) break; if (lot.remaining <= 1e-7) continue; take(g, lot, clampQty(Math.min(g.remaining, lot.remaining)), false); } }
-      for (const g of grp) { const required = Number(g.x.quantity), shortage = clampQty(g.remaining + Object.values(g.miss).reduce((t, v) => t + v, 0)); shipments.set(g.x.id, { required, shipped: clampQty(required - shortage), shortage, allocations: g.allocations, tx: true, txMiss: g.miss, txNone: g.none }); }
+      for (const g of grp) {
+        const missQ = clampQty(Object.values(g.miss).reduce((t, v) => t + v, 0)); g.none = Math.max(0, clampQty(g.remaining - missQ));
+        // 先改扣批號對不上的（客人的），再扣明細沒涵蓋的（寄門市等）
+        let sub = missQ;
+        for (const lot of g.elig) { if (sub <= 1e-7 || g.remaining <= 1e-7) break; if (lot.remaining <= 1e-7) continue; const q = clampQty(Math.min(sub, g.remaining, lot.remaining)); take(g, lot, q, true); g.allocations[g.allocations.length - 1].txSub = true; sub = clampQty(sub - q); }
+        for (const lot of g.elig) { if (g.remaining <= 1e-7) break; if (lot.remaining <= 1e-7) continue; take(g, lot, clampQty(Math.min(g.remaining, lot.remaining)), false); }
+      }
+      for (const g of grp) { const required = Number(g.x.quantity), shortage = clampQty(g.remaining); shipments.set(g.x.id, { required, shipped: clampQty(required - shortage), shortage, allocations: g.allocations, tx: true, txMiss: g.miss, txNone: g.none }); }
       continue;
     }
     const required = Number(x.quantity); let remaining = required; const allocations = [];
@@ -627,7 +635,7 @@ function renderTxRecon(ledger, day) {
   const issue = x => x.miss || (R.full && x.gap);
   const rows = R.rows.map(x => {
     const ok = !x.miss && !x.gap;
-    const st = ok ? badge('一致', 'ok') : [x.miss ? badge(`批號對不上 ${fmt(x.miss)}`, 'bad') : '', x.gap ? `<span title="${esc(x.gap > 0 ? '總表的出貨比交易明細＋寄門市＋調整單多：試吃、還沒開單（等隔天的明細）、調整明細表還沒匯、總表打錯…' : '交易明細＋寄門市＋調整單比總表的出貨多：總表少記、門市入貨日期不對…')}">${badge(x.gap > 0 ? `總表多 ${fmt(x.gap)}` : `明細＋門市多 ${fmt(-x.gap)}`, R.full ? 'due' : 'other')}</span>` : ''].filter(Boolean).join(' ');
+    const st = ok ? badge('一致', 'ok') : [x.miss ? `<span title="交易明細上的批號，App 庫存裡沒有或不夠；數量已照先到期先出改扣別批（庫存跟總表一致），常見原因是前一天開單的明細還沒匯入">${badge(`批號對不上 ${fmt(x.miss)}`, 'bad')}</span>` : '', x.gap ? `<span title="${esc(x.gap > 0 ? '總表的出貨比交易明細＋寄門市＋調整單多：試吃、還沒開單（等隔天的明細）、調整明細表還沒匯、總表打錯…' : '交易明細＋寄門市＋調整單比總表的出貨多：總表少記、門市入貨日期不對…')}">${badge(x.gap > 0 ? `總表多 ${fmt(x.gap)}` : `明細＋門市多 ${fmt(-x.gap)}`, R.full ? 'due' : 'other')}</span>` : ''].filter(Boolean).join(' ');
     return `<tr class="${issue(x) ? 'row-on' : ''}">${td(`<strong class="mono">${esc(x.code)}</strong>`)}<td class="num">${fmt(x.req)}</td><td class="num">${fmt(x.detQ)}</td><td class="num">${fmt(x.shop)}</td><td class="num">${x.adj ? fmt(x.adj) : '—'}</td><td class="num">${x.gap ? fmt(x.gap) : '—'}</td><td class="exp-cell"><div class="exp-chips">${chips(x.det, 'other') || '—'}</div></td><td class="exp-cell"><div class="exp-chips">${chips(x.app, 'future') || '—'}</div></td>${td(st)}</tr>`;
   });
   const tot = f => clampQty(R.rows.reduce((t, x) => t + f(x), 0)), bad = R.rows.filter(issue).length;
@@ -674,7 +682,7 @@ function renderDailyCheck(today, ledger) {
     const R = txReconData(ledger, d); let c4 = B('—', 'other', '這天排單的貨還沒有交易明細');
     if (R.recs.length) {
       const missQ = clampQty(sumQ(R.rows, x => x.miss)), gapQ = clampQty(sumQ(R.rows, x => Math.abs(x.gap))), parts = [];
-      if (missQ) parts.push(flag(B(`批號對不上 ${fmt(missQ)}`, 'bad', '交易明細上的批號，App 庫存裡沒有或不夠：先補匯前一天的明細，還在就查總表的轉現貨、換盒'), true));
+      if (missQ) parts.push(flag(B(`批號對不上 ${fmt(missQ)}`, 'bad', '交易明細上的批號，App 庫存裡沒有或不夠（數量已照先到期先出改扣別批，庫存跟總表一致）：先補匯前一天的明細，還在就查總表的轉現貨、換盒'), true));
       if (!R.full) for (const t of R.due) parts.push(t >= today ? B(`等 ${md(t)} 明細`, 'other', `${md(t)} 開單的明細明天才有；很多訂單揀貨隔天才開單`) : flag(B(`缺 ${md(t)} 明細`, 'due', `${md(t)} 開單的交易明細沒匯入，這天的核對不完整`), true));
       else if (gapQ) parts.push(flag(B(`差 ${fmt(gapQ)}`, 'due', '總表的出貨 ≠ 交易明細＋寄門市＋調整單（試吃、總表打錯、門市入貨日期不對…），到「出貨扣批明細」看是哪個品號'), true));
       if (!parts.length) parts.push(B('一致', 'ok'));
