@@ -72,7 +72,7 @@ const expShow = d => d === NO_EXPIRY ? '—' : d;
 // 不需要管理的產品：品名含這些字的（例如「CK-08|YA-23 6朱|擺盤」）不同步、不顯示，所有表格與計算都當作不存在
 const EXCLUDE_WORDS = ['擺盤'];
 const isExcluded = name => EXCLUDE_WORDS.some(w => String(name || '').includes(w));
-const blankState = () => ({ version: 1, products: [], opening: [], movements: [], shops: [], audits: [], settings: { warnDays: 30, defaultShelf: 30, stockDays: 12, stockWarn: 3, semiWarn: 15 } });
+const blankState = () => ({ version: 1, products: [], opening: [], movements: [], shops: [], audits: [], txbs: [], settings: { warnDays: 30, defaultShelf: 30, stockDays: 12, stockWarn: 3, semiWarn: 15 } });
 
 /* ---------- 狀態 ---------- */
 let data = blankState();
@@ -121,6 +121,16 @@ function sanitizeRec(r) {
   if (r.type === 'production') return isDate(r.date) ? { ...lot, type: 'production', date: r.date } : null;
   return null;
 }
+// 總公司交易明細的批號（txb）：交易日 tx 的明細，照訂單單號對到排單日 date（揀貨那天），每個品號（第一段）一筆 { 批號: 數量 }；
+// 批號空白存成「—」（明細沒寫批號，扣的時候照先到期先出）；unmatched＝訂單不在排單表，只列在核對表、不拿來扣
+function sanitizeTxb(r) {
+  if (!r || typeof r !== 'object' || !r.id || !isDate(r.tx) || !isDate(r.date)) return null;
+  const code = clean(r.code).toUpperCase(); if (!/^[A-Z0-9]{1,8}(-[A-Z0-9]{1,8})?$/.test(code)) return null;
+  const batches = {};
+  if (r.batches && typeof r.batches === 'object') for (const [b, v] of Object.entries(r.batches).slice(0, 80)) { const k = cleanBatch(b) || '—', n = Number(v); if (n > 0 && n < 1e7) batches[k] = clampQty((batches[k] || 0) + n); }
+  if (!Object.keys(batches).length) return null;
+  return { id: String(r.id), tx: r.tx, date: r.date, code, batches, n: Number(r.n) || 0, by: clean(r.by), at: r.at || '', ...(r.unmatched ? { unmatched: true, orders: Array.isArray(r.orders) ? r.orders.filter(o => ORDER_RE.test(o)).slice(0, 60) : [] } : {}) };
+}
 function addVirtualProducts(st) {
   const names = new Set(st.products.map(p => p.name));
   for (const r of [...st.opening, ...st.movements]) if (!names.has(r.product)) { names.add(r.product); st.products.push({ id: productId(r.product), name: r.product, unit: '個', shelfDays: st.settings.defaultShelf, lowStock: 0, virtual: true }); }
@@ -136,7 +146,8 @@ function rebuild() {
   const shops = [];
   for (const r of FEStore.list('shop')) { const x = sanitizeShop(r); if (x && !isExcluded(x.product)) shops.push(x); }
   const audits = FEStore.list('audit').map(sanitizeAudit).filter(Boolean);
-  data = addVirtualProducts({ version: 1, products, opening, movements, shops, audits, settings });
+  const txbs = FEStore.list('txb').map(sanitizeTxb).filter(Boolean);
+  data = addVirtualProducts({ version: 1, products, opening, movements, shops, audits, txbs, settings });
 }
 
 /* ---------- 寫入（先存這台裝置，背景上傳雲端） ---------- */
@@ -162,6 +173,7 @@ function replaceAll(st) {
     moves: uniq(st.movements, r => r.id).map(strip),
     ...(Array.isArray(st.shops) ? { shop: uniq(st.shops, r => r.id).map(strip) } : {}), // 舊備份沒有門市資料時不動門市
     ...(Array.isArray(st.audits) ? { audit: uniq(st.audits, r => r.id).map(strip) } : {}), // 舊備份沒有盤點資料時不動盤點
+    ...(Array.isArray(st.txbs) ? { txb: uniq(st.txbs, r => r.id).map(strip) } : {}), // 舊備份沒有交易明細批號時不動
   });
 }
 function act(fn) { try { fn(); return true; } catch (err) { toast(err.message || '操作失敗', true, 6000); return false; } }
@@ -176,6 +188,7 @@ function normalizeImport(d) {
     movements: d.movements.map(r => sanitizeRec(r)).filter(r => r && r.type !== 'opening'),
     ...(Array.isArray(d.shops) ? { shops: d.shops.map(sanitizeShop).filter(Boolean) } : {}),
     ...(Array.isArray(d.audits) ? { audits: d.audits.map(sanitizeAudit).filter(Boolean) } : {}),
+    ...(Array.isArray(d.txbs) ? { txbs: d.txbs.map(sanitizeTxb).filter(Boolean) } : {}),
     settings: normSettings(d.settings),
   };
 }
@@ -192,7 +205,7 @@ function validateImport(obj) {
 }
 function exportState() {
   const maxSeq = [...data.opening, ...data.movements].reduce((m, x) => Math.max(m, Number(x.seq) || 0), 0);
-  return { version: 1, products: data.products.map(({ virtual, ...p }) => p), opening: data.opening.map(({ type, ...r }) => r), movements: data.movements.map(r => ({ ...r })), shops: data.shops.map(r => ({ ...r })), audits: data.audits.map(r => ({ ...r })), settings: { ...data.settings }, nextSeq: maxSeq + 1 };
+  return { version: 1, products: data.products.map(({ virtual, ...p }) => p), opening: data.opening.map(({ type, ...r }) => r), movements: data.movements.map(r => ({ ...r })), shops: data.shops.map(r => ({ ...r })), audits: data.audits.map(r => ({ ...r })), txbs: data.txbs.map(r => ({ ...r })), settings: { ...data.settings }, nextSeq: maxSeq + 1 };
 }
 
 /* ---------- 庫存引擎：依日期重放所有事件；同日先入庫，再依出貨順序扣最早到期者 ---------- */
@@ -203,6 +216,8 @@ function exportState() {
 //            手動的半成品減少、現貨減少＝當天結束（出貨之後）；隔夜差異（phase 'open'）＝當天最一開始（比當天入庫還早）
 const adjPriority = x => x.phase === 'open' ? -1 : x.phase === 'close' ? 3.5 : x.dir === 'add' ? (x.pool === 'stock' ? 1.5 : 0) : (x.pool !== 'stock' && x.phase === 'pack' ? 0.9 : 3);
 const baseCode = name => productCodeOf(name).split('|')[0];
+// 出貨時這一批的批號：現貨用那批的批號；直接從半成品出的貨用出貨當天的批號；期初現貨沒有批號
+const lotBatchOn = (l, day) => l.expiryDate === NO_EXPIRY ? '' : (l.batch && l.batch !== '—' ? l.batch : makeBatch(l.product, day));
 /* 可販售期（只用在門市）：蛋糕類（CL 以外）可販售 15 天、第 11 天起提醒；生巧克力（CL 開頭）可販售 10 天、第 7 天起提醒
    （「可販售期」設定可改，存在 settings 'sell'）。門市入貨那天算第 1 天，最後可販售日＝入貨日＋可販售天數－1。
    總公司只看半成品與現貨的有效日期（製作日期＋保存天數；現貨的製作日期＝轉現貨那天），不套可販售期。 */
@@ -234,6 +249,11 @@ function calculateLedger(asOf = '9999-12-31', st = data) {
   for (const x of st.movements) if (x.date <= asOf) events.push({ date: x.date, priority: x.type === 'adjust' ? adjPriority(x) : prio[x.type] ?? 2, seq: x.seq || 0, type: x.type, item: x });
   events.sort((a, b) => cmp(a.date, b.date) || a.priority - b.priority || a.seq - b.seq || cmp(String(a.item.id), String(b.item.id)));
   const lots = [], shipments = new Map(), converts = new Map(), adjusts = new Map(), byProduct = new Map(), packPool = new Map();
+  // 總公司交易明細的批號：排單日＋品號第一段 → { 批號: 數量 }（同一天、同一個品號第一段的出貨共用，例如 CK-14 和 CK-14|YB-86，照出貨順序扣）
+  const txPool = new Map();
+  for (const t of st.txbs || []) { if (t.unmatched || t.date > asOf) continue; const k = t.date + '|' + t.code, m = txPool.get(k) || {}; for (const [b, q] of Object.entries(t.batches)) m[b] = clampQty((m[b] || 0) + q); txPool.set(k, m); }
+  const shipGroups = new Map(), txDone = new Set();
+  if (txPool.size) for (const ev of events) if (ev.type === 'shipment') { const k = ev.date + '|' + baseCode(ev.item.product); if (txPool.has(k)) { if (!shipGroups.has(k)) shipGroups.set(k, []); shipGroups.get(k).push(ev.item); } }
   const addLot = lot => { lots.push(lot); if (!byProduct.has(lot.product)) byProduct.set(lot.product, []); byProduct.get(lot.product).push(lot); };
   const prior = (l, d) => l.source === 'opening' || l.entryDate < d;
   const noExpFirst = (a, b) => (a.expiryDate === NO_EXPIRY ? 0 : 1) - (b.expiryDate === NO_EXPIRY ? 0 : 1); // 期初現貨沒有效期資料，當最舊的先出
@@ -288,8 +308,28 @@ function calculateLedger(asOf = '9999-12-31', st = data) {
     const B = isStockModeDay(e.date);
     const rank = l => B ? ((prior(l, e.date) || l.source === 'convert') ? 0 : 2) : ((prior(l, e.date) || l.source === 'convert') ? (l.pool === 'stock' ? 0 : 1) : (l.pool === 'stock' ? 2 : 3));
     eligible.sort((a, b) => rank(a) - rank(b) || noExpFirst(a, b) || tie(a, b));
+    const allocOf = (lot, amount, tx) => ({ lotId: lot.id, pool: lot.pool, source: lot.source, product: lot.product, batch: lot.batch, manufactureDate: lot.manufactureDate, expiryDate: lot.expiryDate, entryDate: lot.entryDate, quantity: amount, ...(tx ? { tx: true } : {}) });
+    const use = (lot, amount) => { lot.remaining = clampQty(lot.remaining - amount); lot.used = clampQty(lot.used + amount); lot.shipped = clampQty(lot.shipped + amount); };
+    // 有匯入那天的交易明細：同一天、同一個品號第一段（例如 CA-25 和 CA-25|YC-09）的出貨一起扣，第一筆出貨時整組一次算完
+    //   ① 明細的批號：誰的庫存有那個批號就由誰扣（組合品和單品各有各的批）；庫存裡沒有或不夠的記成「批號對不上」（txMiss），不改扣別批、算在缺口
+    //   ② 明細沒寫批號、或明細比總表少的部分（txNone）才照先到期先出
+    const gk = e.date + '|' + baseCode(x.product), pool = txPool.get(gk);
+    if (pool) {
+      if (txDone.has(gk)) continue;
+      txDone.add(gk);
+      const grp = (shipGroups.get(gk) || [x]).map(it => ({ x: it, remaining: Number(it.quantity), allocations: [], miss: {}, none: 0, elig: (byProduct.get(it.product) || []).filter(usable).sort((a, b) => rank(a) - rank(b) || noExpFirst(a, b) || tie(a, b)) }));
+      const take = (g, lot, amount, tx) => { use(lot, amount); g.remaining = clampQty(g.remaining - amount); g.allocations.push(allocOf(lot, amount, tx)); };
+      for (const b of Object.keys(pool).filter(k => k !== '—').sort((p, q) => cmp(batchDate(p) || p, batchDate(q) || q))) {
+        let need = pool[b];
+        for (const g of grp) for (const lot of g.elig) { if (need <= 1e-7 || g.remaining <= 1e-7) break; if (lot.remaining <= 1e-7 || lotBatchOn(lot, e.date) !== b) continue; const amount = clampQty(Math.min(need, g.remaining, lot.remaining)); take(g, lot, amount, true); need = clampQty(need - amount); }
+        for (const g of grp) { if (need <= 1e-7) break; if (g.remaining <= 1e-7) continue; const m = clampQty(Math.min(need, g.remaining)); g.remaining = clampQty(g.remaining - m); g.miss[b] = clampQty((g.miss[b] || 0) + m); need = clampQty(need - m); }
+      }
+      for (const g of grp) { g.none = g.remaining; for (const lot of g.elig) { if (g.remaining <= 1e-7) break; if (lot.remaining <= 1e-7) continue; take(g, lot, clampQty(Math.min(g.remaining, lot.remaining)), false); } }
+      for (const g of grp) { const required = Number(g.x.quantity), shortage = clampQty(g.remaining + Object.values(g.miss).reduce((t, v) => t + v, 0)); shipments.set(g.x.id, { required, shipped: clampQty(required - shortage), shortage, allocations: g.allocations, tx: true, txMiss: g.miss, txNone: g.none }); }
+      continue;
+    }
     const required = Number(x.quantity); let remaining = required; const allocations = [];
-    for (const lot of eligible) { if (remaining <= 1e-7) break; const amount = clampQty(Math.min(remaining, lot.remaining)); lot.remaining = clampQty(lot.remaining - amount); lot.used = clampQty(lot.used + amount); lot.shipped = clampQty(lot.shipped + amount); remaining = clampQty(remaining - amount); allocations.push({ lotId: lot.id, pool: lot.pool, source: lot.source, product: lot.product, batch: lot.batch, manufactureDate: lot.manufactureDate, expiryDate: lot.expiryDate, entryDate: lot.entryDate, quantity: amount }); }
+    for (const lot of eligible) { if (remaining <= 1e-7) break; if (lot.remaining <= 1e-7) continue; const amount = clampQty(Math.min(remaining, lot.remaining)); use(lot, amount); allocations.push(allocOf(lot, amount, false)); remaining = clampQty(remaining - amount); }
     shipments.set(x.id, { required, shipped: clampQty(required - remaining), shortage: clampQty(remaining), allocations });
   }
   return { lots, shipments, converts, adjusts };
@@ -509,6 +549,7 @@ let allocDate = '';
 const shipDates = () => [...new Set(data.movements.filter(x => x.type === 'shipment').map(x => x.date))].sort();
 function allocDay() { if (isDate(allocDate)) return allocDate; const t = TODAY(), ds = shipDates().filter(d => d <= t); return ds.length ? ds[ds.length - 1] : t; }
 function renderAllocations(ledger) {
+  renderTxRecon(ledger, allocDay());
   const day = allocDay(), dates = shipDates(), prev = dates.filter(d => d < day).pop(), next = dates.find(d => d > day);
   const di = $('allocationDate'); if (document.activeElement !== di) di.value = day;
   for (const [id, d] of [['allocPrev', prev], ['allocNext', next]]) { const b = $(id); b.disabled = !d; b.dataset.date = d || ''; b.title = d ? `跳到 ${d}` : '沒有更多有出貨的日子'; }
@@ -528,6 +569,139 @@ function renderAllocations(ledger) {
   $('allocationCount').textContent = rows.length ? `${day}：${rows.length} 項產品，扣貨 ${fmt(allQ)} 個（現貨 ${fmt(stockQ)}、半成品 ${fmt(clampQty(allQ - stockQ))}）${shortQ ? `，缺口 ${fmt(shortQ)} 個` : ''}；用上方的日期或「前一天／後一天」切換` : `${day} 沒有出貨扣批紀錄`;
   const chip = a => `<span class="pill ${a.pool === '現貨' ? 'future' : 'other'} exp-chip" title="${esc(`${a.pool}｜${a.lab}｜製作 ${a.mfg}｜效期 ${expShow(a.exp)}`)}"><span class="mono">${esc(a.lab)}</span> ${esc(a.pool)} ×${esc(fmt(a.q))}</span>`;
   $('allocationTable').innerHTML = table(['產品', `${md(day)} 扣的批號／製作日期（先到期先扣）`, '出貨需求#', '扣貨#', '缺口#', '明細'], rows.map(g => `<tr>${td(`<strong>${esc(g.product)}</strong>`)}<td class="exp-cell"><div class="exp-chips">${[...g.parts.values()].map(chip).join('')}${g.short ? `<span class="pill bad exp-chip">缺 ${esc(fmt(g.short))}</span>` : ''}</div></td><td class="num">${fmt(reqOf.get(g.product) || 0)}</td><td class="num">${fmt(qOf(g))} ${esc(getUnit(g.product))}</td><td class="num">${g.short ? badge(fmt(g.short), 'bad') : '—'}</td>${detailBtn('allocation', g.product)}</tr>`), `${day} 沒有出貨扣批紀錄`);
+}
+// 交易明細核對（總公司）：這一天（排單日）總表的實際揀貨 vs 交易明細的數量與批號
+const allocBatch = (a, day) => a.expiryDate === NO_EXPIRY ? '期初現貨' : (a.batch && a.batch !== '—' ? a.batch : makeBatch(a.product, day) || '—');
+const txBatchLab = b => b === '—' ? '沒寫批號' : batchMd(b) ? `${b.slice(4, 6)}（${batchMd(b)}）` : b;
+function renderTxRecon(ledger, day) {
+  const box = $('txRecon'), info = $('txInfo'); if (!box) return;
+  const recs = data.txbs.filter(r => r.date === day && !r.unmatched), unm = data.txbs.filter(r => r.unmatched && r.tx === day);
+  const by = new Map(), g = bc => { if (!by.has(bc)) by.set(bc, { code: bc, req: 0, det: {}, app: {}, miss: 0, none: 0 }); return by.get(bc); };
+  for (const r of recs) { const x = g(r.code); for (const [b, q] of Object.entries(r.batches)) x.det[b] = clampQty((x.det[b] || 0) + q); }
+  for (const sh of data.movements) {
+    if (sh.type !== 'shipment' || sh.date !== day) continue;
+    const x = g(baseCode(sh.product)), L = ledger.shipments.get(sh.id); x.req = clampQty(x.req + sh.quantity); if (!L) continue;
+    for (const a of L.allocations) { const b = allocBatch(a, day); x.app[b] = clampQty((x.app[b] || 0) + a.quantity); }
+    if (L.tx) { x.miss = clampQty(x.miss + Object.values(L.txMiss || {}).reduce((t, v) => t + v, 0)); x.none = clampQty(x.none + (L.txNone || 0)); }
+  }
+  const src = new Map(); for (const r of recs) src.set(r.tx, clampQty((src.get(r.tx) || 0) + sumQ(Object.values(r.batches), v => v)));
+  const unmQ = sumQ(unm, r => sumQ(Object.values(r.batches), v => v));
+  if (!recs.length) {
+    info.textContent = `跟上面同一天（${day}）。這天還沒有交易明細，批號照先到期先出`;
+    box.innerHTML = `<div class="empty">${unm.length ? `${md(day)} 開單的交易明細有 ${fmt(unmQ)} 個對不到排單表（見下方）。` : ''}按「匯入交易明細」選 POS 匯出的交易明細表（倉庫 1＝總公司）：數量照總表，批號照明細扣，對不上的會列在這裡。</div>${unm.length ? txUnmatchedHtml(unm) : ''}`;
+    return;
+  }
+  const chips = (m, cls) => Object.entries(m).sort((a, b) => cmp(a[0], b[0])).map(([b, q]) => `<span class="pill ${cls} exp-chip" title="${esc(b)}"><span class="mono">${esc(txBatchLab(b))}</span> ×${esc(fmt(q))}</span>`).join('');
+  const rows = [...by.values()].sort((a, b) => productOrder(a.code, b.code)).map(x => {
+    const detQ = sumQ(Object.values(x.det), v => v), diff = clampQty(detQ - x.req), ok = !diff && !x.miss && !x.none;
+    const st = ok ? badge('一致', 'ok') : [diff ? badge(diff > 0 ? `明細多 ${fmt(diff)}` : `明細少 ${fmt(-diff)}`, 'due') : '', x.miss ? badge(`批號對不上 ${fmt(x.miss)}`, 'bad') : '', x.none ? badge(`沒有明細批號 ${fmt(x.none)}`, 'other') : ''].filter(Boolean).join(' ');
+    return `<tr class="${ok ? '' : 'row-on'}">${td(`<strong class="mono">${esc(x.code)}</strong>`)}<td class="num">${fmt(x.req)}</td><td class="num">${fmt(detQ)}</td><td class="exp-cell"><div class="exp-chips">${chips(x.det, 'other') || '—'}</div></td><td class="exp-cell"><div class="exp-chips">${chips(x.app, 'future') || '—'}</div></td>${td(st)}</tr>`;
+  });
+  const tot = f => clampQty([...by.values()].reduce((t, x) => t + f(x), 0)), detAll = tot(x => sumQ(Object.values(x.det), v => v)), bad = [...by.values()].filter(x => clampQty(sumQ(Object.values(x.det), v => v) - x.req) || x.miss || x.none).length;
+  info.textContent = `跟上面同一天（${day}）：總表 ${fmt(tot(x => x.req))} 個、交易明細 ${fmt(detAll)} 個（${[...src.entries()].sort().map(([t, q]) => `${md(t)} 開單 ${fmt(q)}`).join('、')}）${bad ? `；${bad} 項有落差` : '；全部一致'}`;
+  box.innerHTML = table(['品號', '總表需求#', '明細#', '明細的批號', 'App 扣的批號（明細優先，再先到期先出）', '核對'], rows, '') + (unm.length ? txUnmatchedHtml(unm) : '');
+}
+function txUnmatchedHtml(unm) {
+  const q = sumQ(unm, r => sumQ(Object.values(r.batches), v => v)), ords = [...new Set(unm.flatMap(r => r.orders || []))];
+  return `<p class="modal-note" style="margin:10px 14px">這天開單、但訂單不在揀貨總表排單（前 3 天到後 1 天）的明細 ${fmt(q)} 個，沒有拿來扣：${esc(unm.map(r => `${r.code} ×${fmt(sumQ(Object.values(r.batches), v => v))}`).join('、'))}${ords.length ? `（訂單 ${esc(ords.slice(0, 6).join('、'))}${ords.length > 6 ? '…' : ''}）` : ''}</p>`;
+}
+
+/* ---------- 總公司交易明細（POS 匯出，倉庫 1＝總公司）→ 出貨批號 ----------
+   數量以總表的實際揀貨為準，交易明細只用來決定扣哪個批號。交易明細記的是開單日、總表記的是揀貨日（排單日），
+   所以用訂單單號找它在揀貨總表哪一天的「MMDD排」（沒勾刪單；雲端後端 pickOrders），照那天扣：
+   同一張訂單出現在好幾天時，優先開單當天，再來是之前最近的一天，最後才是之後的；批號的製造日期晚於那天的不算（那天還沒做出來）。
+   沒有訂單單號的列算開單當天；對不到排單表的列存成 unmatched（只在核對表列出，不拿來扣）。只看同步範圍的品號（CK、CC、CA…），烙印、運費等不算。
+   存成 txb：id txb-交易日-排單日-品號（unmatched：txb-交易日-x-品號），同一個交易日再匯入一次會取代上次的。 */
+function parseTxDetail(text, fallbackDate) {
+  const rows = splitTable(text); let hi = -1, col = {};
+  for (let i = 0; i < Math.min(rows.length, 8) && hi < 0; i++) {
+    const f = re => rows[i].findIndex(c => re.test(c)), code = f(/品號|商品編號|商品代碼|貨號|sku/i), qty = f(/數量|qty/i);
+    if (code >= 0 && qty >= 0) hi = i, col = { code, qty, batch: f(/批號|批次|^lot/i), date: f(/日期|date/i), wh: f(/倉庫|倉別|庫別/), order: f(/訂單單號|訂單編號|銷貨單號|^單號/) };
+  }
+  if (hi < 0) throw Error('找不到標題列：要有「品號」和「數量」欄');
+  if (col.batch < 0) throw Error('找不到「批號」欄');
+  if (col.date < 0 && !isDate(fallbackDate)) throw Error('檔案沒有日期欄，請選開單日期');
+  const pf = portalPrefixes(), out = [], skip = { wh: 0, other: 0, bad: 0 };
+  rows.slice(hi + 1).forEach(cells => {
+    if (cells.some(c => /^(合計|小計|總計|total)/i.test(c))) return;
+    if (col.wh >= 0 && String(cells[col.wh] || '').replace(/^0+(?=\d)/, '') !== POS_HQ) { skip.wh++; return; }
+    const code = clean(cells[col.code]).toUpperCase(); if (!code) return;
+    if (!pf.includes(codePrefix(code))) { skip.other++; return; }
+    const q = numCell(cells[col.qty]), date = col.date >= 0 ? parseCellDate(cells[col.date]) : fallbackDate;
+    if (!(q > 0) || q >= 1e7 || !date) { skip.bad++; return; }
+    out.push({ code: code.split('|')[0], q, batch: cleanBatch(cells[col.batch]), tx: date, order: col.order >= 0 ? orderNo(cells[col.order]) : '' });
+  });
+  return { rows: out, skip, hasWh: col.wh >= 0, hasOrder: col.order >= 0 };
+}
+// 這一列是哪一天揀貨的：cands＝這張訂單出現在哪幾天的排單（沒勾刪單）
+function txPickDay(row, cands) {
+  const bd = batchDate(row.batch), ok = cands.filter(d => !bd || d >= bd).sort();
+  if (!ok.length) return '';
+  if (ok.includes(row.tx)) return row.tx;
+  const before = ok.filter(d => d < row.tx); return before.length ? before[before.length - 1] : ok[0];
+}
+async function openTxImportUI() {
+  if (!can('ship')) return;
+  const pr = modal({ title: '匯入交易明細（總公司）', ok: '下一步：對排單日', wide: true,
+    html: `<p class="modal-note">選 POS 匯出的<strong>交易明細表</strong>（Excel／CSV），或直接貼上。只用<strong>倉庫 1（總公司）</strong>的列和同步範圍的品號（${esc(portalPrefixes().join('、'))}），要有<strong>品號、數量、批號</strong>欄；有<strong>訂單單號</strong>就到揀貨總表找它是哪一天排單揀貨的，照那天核對（交易明細是開單日，總表是揀貨日）。出貨<strong>數量照總表</strong>，明細只決定扣哪個批號：只扣明細上的批號，庫存裡沒有或不夠就記成「批號對不上」。同一個開單日再匯入一次會取代上次的。</p>
+      <div class="form-grid"><div class="field"><label for="tx-date">開單日期（檔案沒有日期欄時用）</label><input id="tx-date" type="date" value="${addDays(TODAY(), -1)}"></div><div class="field"><label for="tx-file">選擇檔案</label><input id="tx-file" type="file" accept=".xlsx,.xls,.xlsm,.ods,.csv,.txt,text/csv,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet,application/vnd.ms-excel"></div></div>
+      <div class="field"><label for="tx-text">或貼上資料（選了檔案會自動帶進來）</label><textarea id="tx-text" rows="5" wrap="off" placeholder="日期	倉庫	品號	數量	訂單單號	批號"></textarea></div>
+      <div id="tx-prev" class="notice"></div><p class="modal-error" hidden></p>`,
+    collect: b => { const r = parseTxDetail(b.querySelector('#tx-text').value, b.querySelector('#tx-date').value); if (!r.rows.length) throw Error('沒有倉庫 1（總公司）、同步範圍品號的列'); return r; } });
+  const body = $('modalBody'), prev = body.querySelector('#tx-prev'), upd = () => {
+    const t = body.querySelector('#tx-text').value; if (!t.trim()) { prev.hidden = true; return; }
+    prev.hidden = false;
+    try { const r = parseTxDetail(t, body.querySelector('#tx-date').value), txs = [...new Set(r.rows.map(x => x.tx))].sort(); prev.className = 'notice'; prev.textContent = `總公司 ${r.rows.length} 列、${fmt(sumQ(r.rows, x => x.q))} 個（開單日 ${txs.map(md).join('、') || '—'}）；其他倉庫 ${r.skip.wh} 列、同步範圍以外的品號 ${r.skip.other} 列不用${r.skip.bad ? `；數量或日期讀不到 ${r.skip.bad} 列` : ''}${r.hasOrder ? '' : '。沒有訂單單號欄：全部算在開單當天'}`; }
+    catch (e) { prev.className = 'notice warning'; prev.textContent = e.message; }
+  };
+  prev.hidden = true;
+  for (const id of ['tx-text', 'tx-date']) body.querySelector('#' + id).addEventListener('input', upd);
+  body.querySelector('#tx-file').addEventListener('change', async e => {
+    const f = e.target.files && e.target.files[0]; if (!f) return;
+    try { body.querySelector('#tx-text').value = await readTableFile(f); upd(); } catch (err) { toast('檔案讀取失敗：' + (err && err.message || err), true, 7000); }
+  });
+  const res = await pr;
+  if (!res || !can('ship')) return;
+  return txImportStep2(res);
+}
+async function txImportStep2(r) {
+  const txs = [...new Set(r.rows.map(x => x.tx))].sort(), want = [...new Set(txs.flatMap(t => [-3, -2, -1, 0, 1].map(k => addDays(t, k))))].sort();
+  let days = {};
+  if (r.hasOrder && r.rows.some(x => x.order)) {
+    toast('正在到揀貨總表對排單日…', false, 15000);
+    try { const j = await FEAuth.api('pickOrders', { dates: want }); days = j.days || {}; }
+    catch (e) { toast(e.code === 'unknown_action' ? '雲端後端還沒更新，不能用訂單單號對排單日。請先照使用說明更新雲端後端（Code.gs）再匯入' : '讀不到揀貨總表：' + (e.message || e), true, 12000); return; }
+  }
+  const where = new Map(); for (const [d, v] of Object.entries(days)) if (v && v.found) for (const o of v.orders || []) { if (!where.has(o)) where.set(o, []); where.get(o).push(d); }
+  const missing = Object.keys(days).length ? want.filter(d => !(days[d] && days[d].found)) : [];
+  const groups = new Map(); let unmQ = 0;
+  for (const x of r.rows) {
+    const d = x.order ? txPickDay(x, where.get(x.order) || []) : x.tx, un = !d, key = `${x.tx}|${un ? 'x' : d}|${x.code}`;
+    const g = groups.get(key) || { tx: x.tx, date: un ? x.tx : d, code: x.code, batches: {}, n: 0, unmatched: un, orders: new Set() };
+    g.batches[x.batch || '—'] = clampQty((g.batches[x.batch || '—'] || 0) + x.q); g.n++; if (un) { g.orders.add(x.order); unmQ += x.q; }
+    groups.set(key, g);
+  }
+  const all = [...groups.values()], byDay = new Map();
+  for (const g of all) { if (g.unmatched) continue; const v = byDay.get(g.date) || { q: 0, codes: new Set() }; v.q = clampQty(v.q + sumQ(Object.values(g.batches), q => q)); v.codes.add(g.code); byDay.set(g.date, v); }
+  const reqOn = d => sumQ(data.movements.filter(m => m.type === 'shipment' && m.date === d), m => m.quantity);
+  const old = data.txbs.filter(t => txs.includes(t.tx)).length;
+  const rowsHtml = [...byDay.entries()].sort().map(([d, v]) => `<tr>${tdm(d)}<td class="num">${fmt(v.q)}</td><td class="num">${v.codes.size}</td><td class="num">${fmt(reqOn(d))}</td></tr>`);
+  const ok = await modal({ title: `交易明細：${txs.map(md).join('、')} 開單`, ok: '匯入', wide: true,
+    html: `<p class="modal-note">總公司 ${fmt(sumQ(r.rows, x => x.q))} 個（${r.rows.length} 列）照訂單單號分到排單日如下；同步範圍以外的品號 ${r.skip.other} 列、其他倉庫 ${r.skip.wh} 列沒有用。${old ? `會取代上次匯入的 ${old} 筆。` : ''}${missing.length ? ` 揀貨總表沒有 ${missing.map(md).join('、')} 的排單表。` : ''}</p>
+      <div class="table-scroll">${table(['排單日（揀貨）', '明細#', '品號數#', '那天總表需求#'], rowsHtml, '沒有對到排單日的列')}</div>
+      ${unmQ ? `<p class="modal-note">對不到排單表的 ${fmt(unmQ)} 個不拿來扣，會列在核對表：${esc([...new Set(all.filter(g => g.unmatched).flatMap(g => [...g.orders]))].slice(0, 8).join('、'))}</p>` : ''}
+      <p class="modal-note">匯入後到「出貨扣批明細」切到那天看核對表。總表那天的明細還不完整（例如前一天開單的還沒匯入）時，缺的部分會先照先到期先出，列成「沒有明細批號」。</p>`,
+    collect: () => true });
+  if (!ok) return;
+  act(() => {
+    const who = myName(), at = nowIso(), recs = all.map(g => ({ id: `txb-${g.tx}-${g.unmatched ? 'x' : g.date}-${g.code}`, tx: g.tx, date: g.date, code: g.code, batches: g.batches, n: g.n, by: who, at, ...(g.unmatched ? { unmatched: true, orders: [...g.orders].filter(Boolean).slice(0, 60) } : {}) }));
+    const keep = new Set(recs.map(x => x.id)), removes = data.txbs.filter(t => txs.includes(t.tx) && !keep.has(t.id)).map(t => t.id);
+    if (removes.length) FEStore.removeMany('txb', removes);
+    FEStore.saveMany('txb', recs);
+    const lastTx = txs[txs.length - 1], latest = [...byDay.keys()].sort().pop(); if (byDay.has(lastTx)) allocDate = lastTx; else if (latest) allocDate = latest;
+    toast(`已匯入 ${txs.map(md).join('、')} 開單的交易明細：分到 ${byDay.size} 天排單${unmQ ? `，${fmt(unmQ)} 個對不到排單表` : ''}。出貨扣批已照明細的批號重算`, false, 8000);
+    go('allocations');
+  });
 }
 function renderProducts(products) {
   const base = $('productLive').checked ? products.filter(x => x.usable > 0 || x.expired > 0) : products;
@@ -2107,6 +2281,7 @@ async function handleAction(el) {
   if (a === 'shop-delete') return deleteShopRec(el.dataset.shop, id);
   if (a === 'shop-batch') return editShopBatch(el.dataset.shop, id);
   if (a === 'store-out') return syncStoreOut(storeOutDates());
+  if (a === 'tx-import') return openTxImportUI();
   if (a.startsWith('detail-')) return openDetail(a.slice(7), id);
   if (a === 'edit-opening') { closeModal(); return can('produce') && populateEdit('opening', id); }
   if (a === 'edit-product') return editProduct(id);
