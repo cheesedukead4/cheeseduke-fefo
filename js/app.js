@@ -937,6 +937,9 @@ const shopName = id => (SHOPS.find(s => s.id === id) || {}).name || id;
 const shopExpiryFor = (product, date) => sellEnd(product, date);
 const shopExp = r => shopExpiryFor(r.product, r.date);
 const cleanBatch = v => clean(v).toUpperCase().replace(/\s+/g, '').slice(0, 30);
+// 訂單單號（OO20261116006、WB00160088833；揀貨總表的「-20261111」日期尾巴去掉）
+const ORDER_RE = /^[A-Z]{1,4}\d{5,20}$/;
+const orderNo = v => { const t = clean(v).toUpperCase().split('-')[0]; return ORDER_RE.test(t) ? t : ''; };
 function sanitizeShop(r) {
   if (!r || typeof r !== 'object' || !r.id || !SHOPS.some(s => s.id === r.shop) || !SHOP_TYPES[r.type] || !isDate(r.date)) return null;
   const q = Number(r.quantity), product = clean(r.product);
@@ -946,6 +949,8 @@ function sanitizeShop(r) {
     x.expiryDate = isDate(r.expiryDate) ? r.expiryDate : ''; if (isDate(r.fromDate)) x.fromDate = r.fromDate;
     // scan：門市確認的批號數量 { 批號: 數量 }（按「確認」或點選正確的批號）
     if (r.scan && typeof r.scan === 'object') { const sc = {}; for (const [b, v] of Object.entries(r.scan).slice(0, 30)) { const k = cleanBatch(b), n = Number(v); if (k && n > 0 && n < 1e7) sc[k] = clampQty((sc[k] || 0) + n); } if (Object.keys(sc).length) x.scan = sc; }
+    // orders：組合品是哪幾張訂單寄來的 { 訂單單號: 數量 }（揀貨總表帶入；空物件＝新版帶入、但沒有訂單）
+    if (r.orders && typeof r.orders === 'object') { const od = {}; for (const [k, v] of Object.entries(r.orders).slice(0, 500)) { const n = Number(v); if (ORDER_RE.test(k) && n > 0 && n < 1e7) od[k] = clampQty((od[k] || 0) + n); } x.orders = od; }
   } else if (r.pref && typeof r.pref === 'object') {
     // pref：匯入的 POS 銷售明細上的批號 { 批號: 數量 }（門市帳先扣這些批號，不夠才先到期先扣）
     const pf = {}; for (const [b, v] of Object.entries(r.pref).slice(0, 30)) { const k = cleanBatch(b), n = Number(v); if (k && n > 0 && n < 1e7) pf[k] = clampQty((pf[k] || 0) + n); } if (Object.keys(pf).length) x.pref = pf;
@@ -1219,7 +1224,7 @@ async function syncStoreOut(dates, { quiet = false, delay = 0 } = {}) {
       const want = new Set();
       for (const sh of SHOPS) {
         if (!canStoreOut(sh.id)) continue;
-        const merged = new Map();
+        const merged = new Map(), ords = new Map(), shopOrders = (d.orders || {})[sh.name] || {};
         for (const x of ((d.stores || {})[sh.name] || [])) {
           if (!Array.isArray(x)) continue;
           const code = clean(x[0]), name = clean(x[1]), q = Number(x[2]);
@@ -1228,12 +1233,17 @@ async function syncStoreOut(dates, { quiet = false, delay = 0 } = {}) {
           if (!p) { unknown.add(name); continue; }
           if (!prefixes.includes(codePrefix(productCodeOf(p.name))) || isExcluded(p.name)) continue;
           merged.set(p.name, clampQty((merged.get(p.name) || 0) + q));
+          // 組合品是哪幾張訂單寄來的（POS 匯入時用訂單單號把 6原＋烙印 組回組合品）
+          const on = shopOrders[name];
+          if (on && typeof on === 'object') { const o = ords.get(p.name) || {}; for (const [k, v] of Object.entries(on)) { const n = Number(v); if (ORDER_RE.test(k) && n > 0) o[k] = clampQty((o[k] || 0) + n); } ords.set(p.name, o); }
         }
+        const hasOrders = !!d.orders; // 後端有回傳訂單單號（新版後端）才記；舊版後端不動原本的紀錄
         for (const [pname, q] of merged) {
-          const id = `pt-in-${sh.id}-${ds}-${productCodeOf(pname)}`, old = existing.get(id);
+          const id = `pt-in-${sh.id}-${ds}-${productCodeOf(pname)}`, old = existing.get(id), o = ords.get(pname);
           want.add(id); cnt[sh.id]++; qn[sh.id] = clampQty(qn[sh.id] + q);
-          const rec = old ? { ...old, product: pname, quantity: q } : { id, shop: sh.id, type: 'in', date: ds, fromDate: ds, product: pname, quantity: q, batch: '', expiryDate: shopExpiryFor(pname, ds), note: '揀貨總表：門市出庫', seq: nextSeq(), by: who, at };
-          if (!old || old.quantity !== q || old.product !== pname) saves.push(rec);
+          let rec = old ? { ...old, product: pname, quantity: q } : { id, shop: sh.id, type: 'in', date: ds, fromDate: ds, product: pname, quantity: q, batch: '', expiryDate: shopExpiryFor(pname, ds), note: '揀貨總表：門市出庫', seq: nextSeq(), by: who, at };
+          if (hasOrders && productCodeOf(pname).includes('|')) { const { orders: _o, ...rest } = rec; rec = { ...rest, orders: o && Object.keys(o).length ? o : {} }; }
+          if (!old || old.quantity !== q || old.product !== pname || JSON.stringify(old.orders || null) !== JSON.stringify(rec.orders || null)) saves.push(rec);
         }
       }
       for (const [id, r] of existing) if (r.date === ds && !want.has(id) && canStoreOut(r.shop)) removes.push(id);
@@ -1497,7 +1507,10 @@ const numCell = v => { const t = clean(v).replace(/[,，\s]/g, ''); return t ===
 /* 解析貼上的內容或檔案（Excel／CSV）：
    有標題列（品號／品名＋數量）就照欄位讀：日期欄 → 依每一列的日期分開匯入；倉庫欄（POS 代號，見 SHOPS.pos）或門市欄 → 分門市（其他倉庫不匯入）；
    批號欄 → 存成 pref（門市帳先扣那個批號，不夠才先到期先扣）；不在產品清單的（運費、蠟燭、蛋捲…）不匯入。
-   組合品（例如 CK-01|YB-86 6原|天蠍烙）：POS 會分成 CK-01、YB-86 兩行，同一張單（訂單單號或交易時間）兩個都有、而且這間門市收過這個組合品，就合併成組合品。
+   組合品（例如 CK-01|YB-86 6原|天蠍烙）：POS 會分成 CK-01、YB-86 兩行（品號跟一般 6原 一樣），用訂單單號對揀貨總表：
+   這張訂單有寄這個組合品到這間門市（門市入貨紀錄的 orders），就把 POS 上這張單的 CK-01（和 YB-86）組回組合品，最多到寄來的數量；
+   門市自己預留（揀貨總表刪單）、現場買的（沒有訂單單號）＝門市拿一般 6原 現場加烙印，扣一般 6原。
+   舊的入貨紀錄沒有訂單資料時：同一張訂單 POS 上組合品的品號都有、而且門市收過這個組合品，才組合。
    沒有標題列：每一行找品號或品名，數量取那一行最後一個數字（舊做法）。
    回傳 groups：[{ shop, date（'' = 用畫面選的日期）, items: [{ product, quantity, pref }] }] */
 function parseShopPaste(text, sid) {
@@ -1513,7 +1526,7 @@ function parseShopPaste(text, sid) {
     if (hi >= 0 && i <= hi) return; // 標題列（和上面的抬頭）
     if (cells.some(c => /^(合計|小計|總計|總和|total)/i.test(c))) return; // 合計列
     const line = cells.join(' ').slice(0, 40);
-    let shop = sid, date = '', p = null, q = NaN, batch = '', code = '', key = 'r' + i;
+    let shop = sid, date = '', p = null, q = NaN, batch = '', code = '', key = 'r' + i, ord = '';
     if (hi >= 0) {
       if (col.wh >= 0 || col.shop >= 0) {
         const v = col.wh >= 0 ? cells[col.wh] || '' : cells[col.shop] || '', s = col.wh >= 0 ? SHOPS.find(x => x.pos === v) : v && SHOPS.find(x => v.includes(x.name));
@@ -1524,7 +1537,8 @@ function parseShopPaste(text, sid) {
       p = (code && matchProductCell(code)) || (col.name >= 0 && matchProductCell(cells[col.name])) || null;
       q = numCell(cells[col.qty]);
       batch = col.batch >= 0 ? cleanBatch(cells[col.batch]) : '';
-      key = (col.order >= 0 && cells[col.order]) || (col.time >= 0 && cells[col.time]) || key;
+      ord = col.order >= 0 ? orderNo(cells[col.order]) : '';
+      key = ord || (col.order >= 0 && cells[col.order]) || (col.time >= 0 && cells[col.time]) || key;
       if (col.date >= 0) { date = parseCellDate(cells[col.date]); if (!date) { if (p || q > 0) skipped.push(line); return; } }
     } else {
       let pi = -1;
@@ -1535,9 +1549,10 @@ function parseShopPaste(text, sid) {
     if (!(q > 0) || q >= 1e7) { if (p || (hi < 0 && cells.some(Boolean))) skipped.push(line); return; }
     if (p && isExcluded(p.name)) return;
     if (!p && !code) { skipped.push(line); return; }
-    ents.push({ shop, date, key, code, p, left: q, batch, label: p ? p.name : `${code} ${col.name >= 0 ? cells[col.name] || '' : ''}`.trim() });
+    ents.push({ shop, date, key, ord, code, p, left: q, batch, label: p ? p.name : `${code} ${col.name >= 0 ? cells[col.name] || '' : ''}`.trim() });
   });
-  // 組合品：同一張單裡每個品號都有，而且這間門市收過這個組合品
+  // 組合品：照訂單單號對門市入貨（揀貨總表寄來的組合品）
+  let comboN = 0;
   const out = new Map(), add = (shop, date, prod, q, batch) => {
     const k = shop + '|' + date, g = out.get(k) || { shop, date, m: new Map() }, x = g.m.get(prod.name) || { product: prod.name, quantity: 0, pref: {} };
     x.quantity = clampQty(x.quantity + q); if (batch) x.pref[batch] = clampQty((x.pref[batch] || 0) + q);
@@ -1547,11 +1562,21 @@ function parseShopPaste(text, sid) {
     const combos = data.products.filter(x => !x.virtual && !isExcluded(x.name) && productCodeOf(x.name).includes('|')).map(x => ({ p: x, codes: productCodeOf(x.name).toUpperCase().split('|') }));
     const byTxn = new Map(); for (const e of ents) { const k = `${e.shop}|${e.date}|${e.key}`; byTxn.set(k, [...(byTxn.get(k) || []), e]); }
     for (const g of byTxn.values()) for (const c of combos) {
-      const { shop, date } = g[0], got = c.codes.map(cd => g.filter(e => e.code === cd && e.left > 0));
+      const { shop, date, ord } = g[0];
+      if (!ord || !g.some(e => e.code === c.codes[0] && e.left > 0)) continue; // 沒有訂單單號（現場買）不組合
+      const ins = data.shops.filter(r => r.shop === shop && r.type === 'in' && r.product === c.p.name && (!date || r.date <= date));
+      if (!ins.length) continue;
+      let cap = Infinity, need = c.codes;
+      if (ins.some(r => r.orders)) {
+        // 新版：這張訂單有寄這個組合品來才組，最多到寄來的數量；POS 上沒有的配件（盒子、腰帶）不用對
+        cap = sumQ(ins, r => (r.orders && r.orders[ord]) || 0); if (!(cap > 0)) continue;
+        need = c.codes.filter(cd => g.some(e => e.code === cd));
+      }
+      const got = need.map(cd => g.filter(e => e.code === cd && e.left > 0));
       if (got.some(a => !a.length)) continue;
-      if (!data.shops.some(r => r.shop === shop && r.type === 'in' && r.product === c.p.name && (!date || r.date <= date))) continue;
-      const n = Math.min(...got.map(a => sumQ(a, e => e.left))); if (!(n > 0)) continue;
-      got.forEach((a, k) => { let need = n; for (const e of a) { const t = clampQty(Math.min(e.left, need)); e.left = clampQty(e.left - t); need = clampQty(need - t); if (k === 0) add(shop, date, c.p, t, e.batch); } });
+      const n = Math.min(cap, ...got.map(a => sumQ(a, e => e.left))); if (!(n > 0)) continue;
+      got.forEach((a, k) => { let left = n; for (const e of a) { const t = clampQty(Math.min(e.left, left)); e.left = clampQty(e.left - t); left = clampQty(left - t); if (k === 0) add(shop, date, c.p, t, e.batch); } });
+      comboN = clampQty(comboN + n);
     }
   }
   for (const e of ents) {
@@ -1560,7 +1585,7 @@ function parseShopPaste(text, sid) {
   }
   const groups = [...out.values()].sort((x, y) => cmp(x.shop === sid ? '' : x.shop, y.shop === sid ? '' : y.shop) || cmp(x.date, y.date))
     .map(g => ({ shop: g.shop, date: g.date, items: [...g.m.values()].map(x => Object.keys(x.pref).length ? x : { product: x.product, quantity: x.quantity }).sort((a, b) => productOrder(a.product, b.product)) }));
-  return { groups, items: groups.flatMap(g => g.items), skipped, untracked, otherWh, header: hi >= 0, dateCol: hi >= 0 && col.date >= 0, shopCol: hi >= 0 && (col.wh >= 0 || col.shop >= 0) };
+  return { groups, items: groups.flatMap(g => g.items), skipped, untracked, otherWh, comboN, header: hi >= 0, dateCol: hi >= 0 && col.date >= 0, shopCol: hi >= 0 && (col.wh >= 0 || col.shop >= 0) };
 }
 const shopImportId = (sid, type, date, product) => `imp-${type}-${sid}-${date}-${productCodeOf(product)}`;
 function shopImportRecords(sid, type, date, items) {
@@ -1591,7 +1616,7 @@ async function openShopImport(sid) {
   if (!can(shopPerm(sid))) return;
   const name = shopName(sid), whNote = SHOPS.map(x => `${x.pos}＝${x.name}`).join('、');
   const pr = modal({ title: `${name}門市：匯入銷售／報廢`, ok: '匯入', wide: true,
-    html: `<p class="modal-note"><strong>選擇檔案</strong>（POS 銷售明細等 Excel .xls／.xlsx 或 CSV）或從 Excel <strong>直接複製貼上</strong>。有標題列就照欄位讀：<strong>品號</strong>（或品名）、<strong>數量</strong>；有<strong>日期</strong>欄照每一列的日期分開匯入；有<strong>倉庫</strong>欄照代號分門市（${esc(whNote)}，其他倉庫不匯入）；有<strong>批號</strong>欄就先扣那個批號，門市沒有那個批號才照先到期先扣。不在產品清單的（運費、蠟燭…）不匯入。同一天、同一類別再匯入一次會<strong>取代</strong>上次匯入的數字；手動登錄的不受影響。</p>
+    html: `<p class="modal-note"><strong>選擇檔案</strong>（POS 銷售明細等 Excel .xls／.xlsx 或 CSV）或從 Excel <strong>直接複製貼上</strong>。有標題列就照欄位讀：<strong>品號</strong>（或品名）、<strong>數量</strong>；有<strong>日期</strong>欄照每一列的日期分開匯入；有<strong>倉庫</strong>欄照代號分門市（${esc(whNote)}，其他倉庫不匯入）；有<strong>批號</strong>欄就先扣那個批號，門市沒有那個批號才照先到期先扣。<strong>組合品</strong>（6原|天蠍烙 等）照<strong>訂單單號</strong>對揀貨總表：總公司有寄這個組合品來才組合，門市自己預留或現場買的扣一般 6原。不在產品清單的（運費、蠟燭…）不匯入。同一天、同一類別再匯入一次會<strong>取代</strong>上次匯入的數字；手動登錄的不受影響。</p>
       <div class="form-grid"><div class="field"><label for="si-date">日期（檔案裡沒有日期欄時用）</label><input id="si-date" type="date" value="${TODAY()}"></div><div class="field"><label for="si-type">類別</label><select id="si-type"><option value="sale">銷售</option><option value="waste">報廢</option></select></div><div class="field span2"><label for="si-file">選擇檔案</label><input id="si-file" type="file" accept=".xlsx,.xls,.xlsm,.ods,.csv,.txt,text/csv,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet,application/vnd.ms-excel"></div></div>
       <label id="si-allrow" class="tog" for="si-all" hidden><input id="si-all" type="checkbox" checked> <span id="si-alltext">同時匯入其他門市</span></label>
       <div class="field"><label for="si-text">或貼上資料（選了檔案會自動帶進來，可以再改）</label><textarea id="si-text" rows="6" wrap="off" placeholder="例如：&#10;品號	品名	數量&#10;CK-01	6原	5&#10;CK-01|YB-86	6原|天蠍烙(閃耀)	3"></textarea></div>
@@ -1618,7 +1643,7 @@ async function openShopImport(sid) {
     const perShop = [...new Set(done.map(g => g.shop))].map(x => `${shopName(x)} ${fmt(sumQ(done.filter(g => g.shop === x).flatMap(g => g.items)))} 個`).join('、');
     const wh = [...r.otherWh.entries()].map(([k, n]) => `${k}（${n} 列）`).join('、'), un = [...r.untracked.keys()];
     const dates = [...new Set(done.map(g => g.date))];
-    box.innerHTML = `<div class="notice${short || r.skipped.length ? ' warning' : ''}">${r.dateCol ? `檔案裡的日期：${esc(dates.map(shortDate).join('、') || '—')}。` : ''}會匯入 ${done.reduce((s, g) => s + g.items.length, 0)} 筆${multi || r.shopCol ? `：${esc(perShop)}` : `、共 ${fmt(sumQ(done.flatMap(g => g.items)))} 個`}${replaced ? `；會取代上次匯入的 ${replaced} 筆` : ''}${short ? `；有 ${fmt(short)} 個庫存不夠扣（缺口${type === 'sale' ? '，過了可販售期的不能銷售' : ''}）` : ''}${r.skipped.length ? `；略過 ${r.skipped.length} 行（數量或日期讀不到）：${esc(r.skipped.slice(0, 3).join('｜'))}${r.skipped.length > 3 ? '…' : ''}` : ''}</div>
+    box.innerHTML = `<div class="notice${short || r.skipped.length ? ' warning' : ''}">${r.dateCol ? `檔案裡的日期：${esc(dates.map(shortDate).join('、') || '—')}。` : ''}會匯入 ${done.reduce((s, g) => s + g.items.length, 0)} 筆${multi || r.shopCol ? `：${esc(perShop)}` : `、共 ${fmt(sumQ(done.flatMap(g => g.items)))} 個`}${r.comboN ? `；照訂單單號組成組合品 ${fmt(r.comboN)} 個` : ''}${replaced ? `；會取代上次匯入的 ${replaced} 筆` : ''}${short ? `；有 ${fmt(short)} 個庫存不夠扣（缺口${type === 'sale' ? '，過了可販售期的不能銷售' : ''}）` : ''}${r.skipped.length ? `；略過 ${r.skipped.length} 行（數量或日期讀不到）：${esc(r.skipped.slice(0, 3).join('｜'))}${r.skipped.length > 3 ? '…' : ''}` : ''}</div>
       ${wh || un.length ? `<p class="modal-note">${wh ? `不是門市的倉庫代號沒有匯入：${esc(wh)}。` : ''}${un.length ? `不在產品清單、沒有匯入的 ${un.length} 種：${esc(un.slice(0, 8).join('、'))}${un.length > 8 ? '…' : ''}` : ''}</p>` : ''}
       <div class="table-scroll">${table([...(multi ? ['門市'] : []), '日期', '產品', '數量#', 'POS 批號', '預估扣除（批號優先，再先到期先扣）', '缺口#'], rows, '')}</div>`;
   };
