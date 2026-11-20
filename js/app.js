@@ -637,12 +637,17 @@ function renderDailyCheck(today, ledger) {
   const Ls = new Map(SHOPS.map(s => [s.id, shopLedger(s.id)])), plan = shopBatchPlan();
   const B = (t, cls, title = '') => `<span class="pill ${cls}"${title ? ` title="${esc(title)}"` : ''}>${esc(t)}</span>`;
   const link = (view, d, html) => `<button type="button" class="chk-go" data-action="chk-go" data-view="${esc(view)}" data-date="${esc(d)}">${html}</button>`;
+  // 開始用系統報表的那天（第一次匯入交易明細或調整明細）以前的「沒匯」不算要處理；都還沒匯過就從昨天算
+  const marks = FEStore.list('settings').filter(r => /^sys-\d{4}-\d{2}-\d{2}$/.test(r.id)).map(r => r.date), starts = [...data.txbs.map(t => t.tx), ...marks].sort(), repStart = starts[0] || addDays(today, -1);
+  const lastPortal = [...portal].filter(d => d <= today).sort().pop() || '';
   let todo = 0;
   const rows = days.map(d => {
     const flag = (html, bad) => { if (bad) todo++; return html; };
-    const c1 = portal.has(d) ? B('已同步', 'ok') : flag(B('沒有總表資料', 'due', '這天沒有從入口網站帶入的生產、出貨。請在入口網站按書籤「同步生產與出貨」（一次讀最近 14 天）'), true);
-    const c2 = link('allocations', d, txDays.has(d) ? B('已匯入', 'ok') : flag(B('沒匯', 'due', `${md(d)} 開單的交易明細表還沒匯入（按「匯入系統報表」）`), true));
-    const mk = sysMark(d), c3 = mk ? B('已匯入', 'ok') : flag(B('沒匯', 'due', `${md(d)} 的調整明細表還沒匯入（按「匯入系統報表」）`), true);
+    // 之後的日子有總表資料、這天沒有＝那天總表沒有數字（例如公休；書籤一次讀 14 天，有的話會一起帶入）
+    const c1 = portal.has(d) ? B('已同步', 'ok') : d < lastPortal ? B('沒有資料', 'other', '這天總表沒有數字（例如公休）') : flag(B('沒同步', 'due', '這天還沒有從入口網站帶入生產、出貨。請在入口網站按書籤「同步生產與出貨」（一次讀最近 14 天）'), true);
+    const early = d < repStart, mk = sysMark(d);
+    const c2 = link('allocations', d, txDays.has(d) ? B('已匯入', 'ok') : early ? B('—', 'other', '還沒開始用系統報表') : flag(B('沒匯', 'due', `${md(d)} 開單的交易明細表還沒匯入（按「匯入系統報表」）`), true));
+    const c3 = mk ? B('已匯入', 'ok') : early ? B('—', 'other', '還沒開始用系統報表') : flag(B('沒匯', 'due', `${md(d)} 的調整明細表還沒匯入（按「匯入系統報表」）`), true);
     // 總公司核對（排單日＝這天）
     const R = txReconData(ledger, d); let c4 = B('—', 'other', '這天排單的貨還沒有交易明細');
     if (R.recs.length) {
