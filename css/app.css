@@ -341,3 +341,9 @@ html.auth-locked .app{display:none}
   .chart-legend .scale{margin-left:0;width:100%}
 }
 @media (prefers-reduced-motion:reduce){*{transition:none!important;animation:none!important}}
+/* 每日檢查（營運總覽）：格子可以按，跳到那一頁那一天 */
+.chk-go{background:none;border:0;padding:0;margin:0;font:inherit;color:inherit;cursor:pointer;text-align:left;display:inline-flex;flex-wrap:wrap;gap:4px;align-items:center}
+.chk-go:hover .pill{text-decoration:underline}
+.chk-sum{font-size:12px;color:var(--muted);white-space:nowrap}
+.dc-due{margin:0;padding:10px 16px 14px;font-size:13px;color:var(--muted);display:flex;flex-wrap:wrap;gap:6px;align-items:center}
+.dc-due strong{color:var(--ink)}
