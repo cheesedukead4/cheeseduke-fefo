@@ -339,7 +339,27 @@ function groupLots(ledger) { const g = new Map(); for (const lot of ledger.lots)
 // 全 App 共用的品號排序：品號開頭 CK（6吋）→ CC（4吋）→ CA（小小公爵）→ CS（方盒）→ CL（生巧），其他開頭（例如 KA）排在後面，同開頭內照品號
 const SORT_PREFIXES = ['CK', 'CC', 'CA', 'CS', 'CL'];
 function prefixRank(name) { const px = String(name).split(/[-| ]/)[0].toUpperCase(), i = SORT_PREFIXES.indexOf(px); return i >= 0 ? i : SORT_PREFIXES.length; }
-function productOrder(a, b) { return prefixRank(a) - prefixRank(b) || cmp(String(a), String(b)); }
+// 排序跟總表一樣（2026-11-20 起）：入口網站同步時記下總表的列順序（settings 'portal' 的 order），照那個順序排；
+// 總表沒有的組合品排在它的一般品後面，其他總表沒有的、或還沒同步過，照舊：CK → CC → CA → CS → CL → 其他，同開頭照品號
+let ordMemo = { data: null, map: new Map() };
+function portalRank(name) {
+  if (ordMemo.data !== data) { const o = (FEStore.get('settings', 'portal') || {}).order; ordMemo = { data, map: new Map((Array.isArray(o) ? o : []).map((c, i) => [String(c).toUpperCase(), i])) }; }
+  const m = ordMemo.map; if (!m.size) return -1;
+  const code = productCodeOf(String(name)).toUpperCase(); if (m.has(code)) return m.get(code);
+  const base = code.split('|')[0]; return m.has(base) ? m.get(base) + 0.5 : Infinity;
+}
+function productOrder(a, b) {
+  const ra = portalRank(a), rb = portalRank(b);
+  if (ra !== rb) return ra === Infinity ? 1 : rb === Infinity ? -1 : ra - rb;
+  return prefixRank(a) - prefixRank(b) || cmp(String(a), String(b));
+}
+// 從書籤讀到的每天資料排出總表的列順序（新的日子為主，舊日子才有的品號插在它前一列的後面），再併進之前記下的
+function portalOrderMerge(days, old) {
+  const order = [], ins = seq => { let prev = -1; for (const c of seq) { const i = order.indexOf(c); if (i >= 0) { prev = i; continue; } order.splice(prev + 1, 0, c); prev++; } };
+  for (const d of Object.keys(days).sort().reverse()) ins(days[d].map(r => String(r.code).toUpperCase()));
+  if (Array.isArray(old)) ins(old.map(c => String(c).toUpperCase()));
+  return order.slice(0, 800);
+}
 const byProductName = list => [...list].sort((a, b) => productOrder(a.name, b.name));
 const poolLabel = (pool, date = TODAY()) => isStockModeDay(date) || pool === 'stock' ? '現貨' : '半成品';
 function productSummary(ledger, asOf = TODAY()) {
@@ -2602,7 +2622,7 @@ function applyPortalPending() {
     if (saves.length) FEStore.saveMany('moves', saves.map(recordBody));
     if (removes.length) FEStore.removeMany('moves', removes);
     const meta = portalMeta(), changed = saves.length + removes.length + openSaves.length + openRemoves.length;
-    FEStore.save('settings', { ...meta, id: 'portal', at: Date.now(), by: who, bv: c.v, first: dates[0] || '', last: dates[dates.length - 1] || '', days: dates.length, ...sum, pQ: clampQty(sum.pQ), sQ: clampQty(sum.sQ), qQ: clampQty(sum.qQ), cQ: clampQty(sum.cQ), ...(stockOpen.set ? { stockOpenDate: from, stockOpenN: stockOpen.n, stockOpenQ: clampQty(stockOpen.q) } : {}), newProducts: newProducts.length, changed, warn: c.warn });
+    FEStore.save('settings', { ...meta, id: 'portal', order: portalOrderMerge(c.days, meta.order), at: Date.now(), by: who, bv: c.v, first: dates[0] || '', last: dates[dates.length - 1] || '', days: dates.length, ...sum, pQ: clampQty(sum.pQ), sQ: clampQty(sum.sQ), qQ: clampQty(sum.qQ), cQ: clampQty(sum.cQ), ...(stockOpen.set ? { stockOpenDate: from, stockOpenN: stockOpen.n, stockOpenQ: clampQty(stockOpen.q) } : {}), newProducts: newProducts.length, changed, warn: c.warn });
     const range = dates.length ? `${shortDate(dates[0])}～${shortDate(dates[dates.length - 1])}` : '沒有可匯入的日期';
     const parts = [okP ? `${modeB === dates.length && dates.length ? '當天生產' : modeB ? '半成品入庫／當天生產' : '半成品入庫'} ${sum.pN} 筆（${fmt(sum.pQ)} 個）` : '', okP && c.hasStock && sum.qN ? `生產轉現貨 ${sum.qN} 筆（${fmt(sum.qQ)} 個）` : '', okP && c.hasConvert && sum.cN ? `半成品轉現貨 ${sum.cN} 筆（${fmt(sum.cQ)} 個）` : '', okP && c.hasAdjust && sum.jN ? `半成品／現貨增減 ${sum.jN} 筆${sum.gN ? `（其中隔夜差異 ${sum.gN} 筆）` : ''}` : '', okS ? `出貨 ${sum.sN} 筆（${fmt(sum.sQ)} 個）` : ''].filter(Boolean).join('、');
     const notes = [modeB ? `${modeB === dates.length ? '全部' : `其中 ${modeB} 天`}用全現貨模式（${stockFromDate()} 起）` : '', stockOpen.set ? `期初現貨 ${stockOpen.n} 個品號（${fmt(stockOpen.q)} 個，${from}）` : '', !c.hasExtra ? '這是舊版書籤，' + (!c.hasStock ? '沒有帶入現貨' : !c.hasConvert ? '沒有帶入半成品轉現貨' : !c.hasAdjust ? '沒有帶入半成品／現貨增減' : '沒有帶入總表的手動數字與隔夜差異') + '，請到「入口網站同步」重新拖曳書籤' : '', dates.some(d => c.noGap.has(d)) ? `${dates.filter(d => c.noGap.has(d)).map(shortDate).join('、')} 沒讀到前一天的總表，隔夜差異沒有更新` : '', newProducts.length ? `新增產品 ${newProducts.length} 項` : '', skippedCodes.size ? `略過 ${prefixes.join('、')} 以外的品號 ${skippedCodes.size} 個` : '', excludedCodes.size ? `略過${EXCLUDE_WORDS.join('、')} ${excludedCodes.size} 個品號` : '', before.length ? `起算日 ${from} 以前的 ${before.length} 天沒有匯入` : '', !okP ? '你沒有生產權限，生產數字沒有存' : '', !okS ? '你沒有出貨權限，出貨數字沒有存' : '', c.warn ? '注意：' + c.warn : ''].filter(Boolean).join('；');
