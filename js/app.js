@@ -588,7 +588,7 @@ function txReconData(ledger, day) {
     for (const a of L.allocations) { const b = allocBatch(a, day); x.app[b] = clampQty((x.app[b] || 0) + a.quantity); }
     if (L.tx) { x.miss = clampQty(x.miss + Object.values(L.txMiss || {}).reduce((t, v) => t + v, 0)); x.none = clampQty(x.none + (L.txNone || 0)); }
   }
-  for (const r of data.shops) if (r.type === 'in' && shopFrom(r) === day) { const x = g(baseCode(r.product)); x.shop = clampQty(x.shop + r.quantity); }
+  for (const r of data.shops) if (r.type === 'in' && !r.aud && shopFrom(r) === day) { const x = g(baseCode(r.product)); x.shop = clampQty(x.shop + r.quantity); }
   const rows = [...by.values()].map(x => { const detQ = sumQ(Object.values(x.det), v => v); return { ...x, detQ, gap: clampQty(x.req - detQ - x.shop - x.adj) }; }).sort((a, b) => productOrder(a.code, b.code));
   const txDays = new Set(data.txbs.map(t => t.tx)), due = [day, addDays(day, 1)].filter(t => !txDays.has(t));
   return { recs, unm, rows, full: !due.length, due };
@@ -630,7 +630,7 @@ const shopAlertN = {};
 const sysMark = d => FEStore.get('settings', 'sys-' + d);
 // 開始用系統報表的那天：第一次匯入的交易明細（開單日）或調整明細的日期；還沒匯過＝''
 const sysRepStart = () => [...data.txbs.map(t => t.tx), ...FEStore.list('settings').filter(r => /^sys-\d{4}-\d{2}-\d{2}$/.test(r.id)).map(r => r.date)].sort()[0] || '';
-const shopBaseTot = (sid, d) => { const m = {}; for (const r of data.shops) if (r.shop === sid && r.type === 'in' && r.date === d) { const c = baseCode(r.product); m[c] = clampQty((m[c] || 0) + r.quantity); } return m; };
+const shopBaseTot = (sid, d) => { const m = {}; for (const r of data.shops) if (r.shop === sid && r.type === 'in' && !r.aud && r.date === d) { const c = baseCode(r.product); m[c] = clampQty((m[c] || 0) + r.quantity); } return m; };
 const sameTot = (a, b) => { const ks = new Set([...Object.keys(a), ...Object.keys(b)]); return [...ks].every(k => Math.abs((a[k] || 0) - (b[k] || 0)) < 1e-7); };
 function renderDailyCheck(today, ledger) {
   const box = $('dailyCheck'); if (!box) return;
@@ -667,11 +667,11 @@ function renderDailyCheck(today, ledger) {
       c5 = !portal.has(d) ? B('總表還沒同步', 'other') : !diff.length ? B('一致', 'ok') : flag(B(`${diff.length} 項不同`, 'due', diff.slice(0, 12).map(c => `${c} 系統 ${fmt(mk.prod[c] || 0)}／總表 ${fmt(app[c] || 0)}`).join('、')), true);
     }
     // 門市
-    const sh = [], nIn = SHOPS.filter(s => data.shops.some(r => r.shop === s.id && r.type === 'in' && r.date === d)).length, nSale = SHOPS.filter(s => data.shops.some(r => r.shop === s.id && r.type === 'sale' && r.date === d)).length;
+    const sh = [], nIn = SHOPS.filter(s => data.shops.some(r => r.shop === s.id && r.type === 'in' && !r.aud && r.date === d)).length, nSale = SHOPS.filter(s => data.shops.some(r => r.shop === s.id && r.type === 'sale' && r.date === d)).length;
     for (const s of SHOPS) {
       const recs = data.shops.filter(r => r.shop === s.id && r.date === d), out = Ls.get(s.id).outs;
       const short = clampQty(sumQ(recs.filter(r => r.type !== 'in'), r => (out.get(r.id) || {}).short || 0));
-      const pend = recs.filter(r => r.type === 'in' && !r.batch).filter(r => { const p = plan.get(r.id) || []; return sumQ(p.filter(x => x.confirmed), x => x.qty) < r.quantity - 1e-7; }).length;
+      const pend = recs.filter(r => r.type === 'in' && !r.batch && !r.aud).filter(r => { const p = plan.get(r.id) || []; return sumQ(p.filter(x => x.confirmed), x => x.qty) < r.quantity - 1e-7; }).length;
       const rv = mk && mk.recv && mk.recv[s.id];
       if (rv) { const c = [d, addDays(d, -1), addDays(d, -2)].map(p => shopBaseTot(s.id, p)); if (!c.some(t => Object.keys(t).length)) sh.push(link('shop-' + s.id, d, flag(B(`${s.name}入貨沒帶入`, 'due', `${md(d)} 的入庫單在 App 找不到對應的入貨（排單日 ${md(addDays(d, -2))}～${md(d)}）：重新匯入那天的調整明細表會從揀貨總表補帶`), true))); else if (!c.some(t => sameTot(t, rv))) sh.push(link('shop-' + s.id, d, flag(B(`${s.name}入庫不同`, 'due', '入庫單的數量跟 App 的入貨（揀貨總表）對不上'), true))); }
       if (txDays.has(d) && !recs.some(r => r.type === 'sale')) sh.push(link('shop-' + s.id, d, flag(B(`${s.name}銷售沒匯`, 'due', `${md(d)} 的交易明細已匯入，但${s.name}沒有銷售紀錄（沒有門市權限的人匯入時不會存門市的部分）`), true)));
@@ -1134,7 +1134,7 @@ function csvData(kind) {
   if (kind === 'batches') return ['批次庫存', ['產品', '單位', '類別', '批號', '製作日期', '有效日期', '原半成品製作日期', '期初庫存', '新增生產', '半成品轉入', '半成品增加', '已出貨', '轉成現貨', '半成品減少', '剩餘量', '狀態'], groups.map(x => [x.product, x.unit, poolLabel(x.pool), x.batch, x.manufactureDate, expShow(x.expiryDate), [...(x.fromMfgs || [])].sort().join('、'), x.opening, x.production, x.convert, x.adjust, x.shipped, x.converted, x.adjusted, x.remaining, expiryStatus(x.expiryDate, x.remaining).label])];
   if (kind === 'allocation') return ['出貨扣批明細', ['出貨日期', '出貨單號', '產品', '單位', '批號', '製作日期', '有效日期', '扣貨量', '類別'], allocationRows(led).map(x => [x.date, x.orderNo, x.product, x.unit, x.batch, x.manufactureDate, expShow(x.expiryDate), x.quantity, x.kind === 'shortage' ? '缺口' : '已分配'])];
   if (kind === 'adjust') return ['半成品現貨增減', ['日期', '產品', '單位', '類別', '增加／減少', '數量', '製作日期', '有效日期', '指定扣除的批', '實際扣除／來源', '缺口', '原因／備註', '登錄人'], data.movements.filter(r => r.type === 'adjust').sort((a, b) => cmp(b.date, a.date) || productOrder(a.product, b.product)).map(r => { const o = led.adjusts.get(r.id); return [r.date, r.product, getUnit(r.product), poolName(r.pool), r.dir === 'add' ? '增加' : '減少', r.quantity, r.manufactureDate || '', r.expiryDate || '', r.fromMfg ? `製 ${r.fromMfg}／效期 ${r.fromExp}` : '', o ? adjPartsText(o.parts) : '', o ? o.shortage : '', r.note, r.by]; })];
-  if (kind === 'shop') { const outs = new Map(); for (const x of SHOPS) for (const [k, v] of shopLedger(x.id).outs) outs.set(k, v); return ['門市紀錄', ['門市', '日期', '類別', '產品', '單位', '批號', '數量', '可販售到', '扣除的批號', '缺口', '備註', '登錄人'], [...data.shops].sort((a, b) => SHOPS.findIndex(x => x.id === a.shop) - SHOPS.findIndex(x => x.id === b.shop) || cmp(b.date, a.date) || productOrder(a.product, b.product)).map(r => { const o = outs.get(r.id); return [shopName(r.shop), r.date, SHOP_TYPES[r.type], r.product, getUnit(r.product), r.type === 'in' ? shopInText(r) : r.batch, r.quantity, r.type === 'in' ? shopExp(r) : '', o ? shopPartsText(o.parts) : '', o ? o.short : '', r.note, r.by]; })]; }
+  if (kind === 'shop') { const outs = new Map(); for (const x of SHOPS) for (const [k, v] of shopLedger(x.id).outs) outs.set(k, v); return ['門市紀錄', ['門市', '日期', '類別', '產品', '單位', '批號', '數量', '可販售到', '扣除的批號', '缺口', '備註', '登錄人'], [...data.shops].sort((a, b) => SHOPS.findIndex(x => x.id === a.shop) - SHOPS.findIndex(x => x.id === b.shop) || cmp(b.date, a.date) || productOrder(a.product, b.product)).map(r => { const o = outs.get(r.id); return [shopName(r.shop), r.date, shopTypeLabel(r), r.product, getUnit(r.product), r.type === 'in' ? shopInText(r) : r.batch, r.quantity, r.type === 'in' ? shopExp(r) : '', o ? shopPartsText(o.parts) : '', o ? o.short : '', r.note, r.by]; })]; }
   return ['產品庫存總表', ['產品', '單位', '期初庫存', '累計生產', '累計扣貨', '可用庫存', '現貨', '半成品', '過期量', '近效期量', '最近有效日期', '低庫存警戒量'], products.map(x => [x.name, x.unit, x.opened, x.produced, x.used, x.usable, x.stock, x.semi, x.expired, x.warning, x.oldest, x.lowStock])];
 }
 function exportCsv(kind) { const [name, headers, records] = csvData(kind); const content = '﻿' + [headers, ...records].map(r => r.map(csvEscape).join(',')).join('\r\n'); downloadFile(`${name}_${TODAY()}.csv`, content, 'text/csv;charset=utf-8', `${name} CSV 已下載`); }
@@ -1246,18 +1246,18 @@ async function deleteAdjust(id) {
    總數不一樣 → 列在「總數差異」請到總表修正（下次同步會以手動數字或隔夜差異帶進來），App 不另外調，避免扣兩次。 */
 function sanitizeAudit(r) {
   if (!r || typeof r !== 'object' || !r.id || !isDate(r.date)) return null;
-  const base = { id: String(r.id), date: r.date, by: clean(r.by), at: r.at || '', ...(r.editBy ? { editBy: clean(r.editBy), editAt: r.editAt || '' } : {}) };
+  const base = { id: String(r.id), date: r.date, by: clean(r.by), at: r.at || '', ...(r.editBy ? { editBy: clean(r.editBy), editAt: r.editAt || '' } : {}), ...(SHOPS.some(x => x.id === r.shop) ? { shop: r.shop } : {}) };
   if (r.type === 'session') return { ...base, type: 'session', seq: Number(r.seq) || 0, phase: r.phase === 'start' ? 'start' : 'end', status: r.status === 'done' ? 'done' : 'open', note: clean(r.note), appliedAt: r.appliedAt || '', appliedBy: clean(r.appliedBy) };
   if (r.type === 'count') {
     const q = Number(r.qty), product = clean(r.product), key = String(r.key || '');
     if (!r.session || !product || !key || !(q >= 0) || q >= 1e7) return null;
-    return { ...base, type: 'count', session: String(r.session), key, product, pool: r.pool === 'stock' ? 'stock' : 'semi', batch: clean(r.batch), mfg: isDate(r.mfg) ? r.mfg : '', exp: isDate(r.exp) ? r.exp : '', qty: clampQty(q), added: !!r.added };
+    return { ...base, type: 'count', session: String(r.session), key, product, pool: r.pool === 'stock' ? 'stock' : 'semi', batch: clean(r.batch), mfg: isDate(r.mfg) ? r.mfg : '', exp: isDate(r.exp) ? r.exp : '', qty: clampQty(q), added: !!r.added, ...(isDate(r.sellFrom) ? { sellFrom: r.sellFrom } : {}) };
   }
   return null;
 }
 const auditKey = (product, pool, batch, mfg, exp) => pool === 'stock' ? `S|${product}|${batch}|${exp}` : `M|${product}|${mfg}|${exp}`;
 let auditSel = '', auditMode = 'all', auditDirty = false;
-const auditSessions = () => data.audits.filter(r => r.type === 'session').sort((a, b) => cmp(b.date, a.date) || b.seq - a.seq);
+const auditSessions = () => data.audits.filter(r => r.type === 'session' && !r.shop).sort((a, b) => cmp(b.date, a.date) || b.seq - a.seq);
 const auditSession = () => auditSessions().find(r => r.id === auditSel) || auditSessions()[0] || null;
 // 帳上：盤點時間點的批次庫存（現貨依批號＋有效日期、半成品依製作日期＋有效日期），已過期的也列
 function auditBook(sess) {
@@ -1399,13 +1399,16 @@ function auditCsv() {
    門市人員登錄：入貨（批號選填；沒填就照總公司當天的出貨扣批「推定」）、銷售、報廢。資料存在 shop_YYYYMM，每筆入貨記下當時算好的有效日期（之後改規則不影響已入貨的）。
    銷售、報廢可指定批號；沒指定就從最早到期的扣（先到期先出）。已過期的不能銷售，只能報廢；不夠扣的列為缺口，不會變負庫存。 */
 // take＝領取（系統調整明細表的「領取」：試吃、員工領用等，從門市庫存扣掉；跟報廢一樣，已過期的也能扣）
-const SHOP_TYPES = { in: '入貨', sale: '銷售', waste: '報廢', take: '領取' };
+// loss＝盤虧（門市盤點的調整，照批號扣；批號不明的列 unk＝只扣批號不明的）；盤點多出來的記成入貨（aud＝哪張盤點單），畫面上叫「盤盈」
+const SHOP_TYPES = { in: '入貨', sale: '銷售', waste: '報廢', take: '領取', loss: '盤虧' };
+const shopTypeLabel = r => r.type === 'in' && r.aud ? '盤盈' : SHOP_TYPES[r.type];
 const shopMode = Object.fromEntries(SHOPS.map(s => [s.id, 'all']));
 const shopName = id => (SHOPS.find(s => s.id === id) || {}).name || id;
 // 門市的可販售天數與提醒日存在 settings 'sell'（見 sellRule）；舊的 settings 'shop' 已不用
 // 門市：入貨那天算第 1 天，最後可販售日＝入貨日＋可販售天數－1（依產品類別；規則改了，已入貨的也跟著重算）
 const shopExpiryFor = (product, date) => sellEnd(product, date);
-const shopExp = r => shopExpiryFor(r.product, r.date);
+// sellFrom＝可販售期的第 1 天（盤盈的入貨：照原本那批貨的入貨日，或保守用批號的製造日期）；沒有就是入貨日
+const shopExp = r => shopExpiryFor(r.product, r.sellFrom || r.date);
 const cleanBatch = v => clean(v).toUpperCase().replace(/\s+/g, '').slice(0, 30);
 // 訂單單號（OO20261116006、WB00160088833；揀貨總表的「-20261111」日期尾巴去掉）
 const ORDER_RE = /^[A-Z]{1,4}\d{5,20}$/;
@@ -1415,6 +1418,10 @@ function sanitizeShop(r) {
   const q = Number(r.quantity), product = clean(r.product);
   if (!product || !(q > 0) || !Number.isFinite(q)) return null;
   const x = { id: String(r.id), seq: Number(r.seq) || 0, shop: r.shop, type: r.type, date: r.date, product, quantity: q, batch: cleanBatch(r.batch), note: clean(r.note), by: clean(r.by), at: r.at || '', ...(r.editBy ? { editBy: clean(r.editBy), editAt: r.editAt || '' } : {}) };
+  if (r.aud) x.aud = clean(r.aud).slice(0, 40);
+  if (r.phase === 'open' || r.phase === 'close') x.phase = r.phase;
+  if (r.type === 'in' && isDate(r.sellFrom) && r.sellFrom <= r.date) x.sellFrom = r.sellFrom;
+  if (r.type === 'loss' && r.unk) x.unk = true;
   if (r.type === 'in') {
     x.expiryDate = isDate(r.expiryDate) ? r.expiryDate : ''; if (isDate(r.fromDate)) x.fromDate = r.fromDate;
     // scan：門市確認的批號數量 { 批號: 數量 }（按「確認」或點選正確的批號）
@@ -1428,9 +1435,11 @@ function sanitizeShop(r) {
   return x;
 }
 // 重放一間門市的紀錄：同一天先入貨再扣；回傳 lots（每筆入貨的剩餘量）與 outs（每筆銷售／報廢扣了哪些批號、缺多少）
-function shopLedger(shop, list = data.shops) {
-  const recs = list.filter(r => r.shop === shop).sort((a, b) => cmp(a.date, b.date) || (a.type === 'in' ? 0 : 1) - (b.type === 'in' ? 0 : 1) || a.seq - b.seq);
-  const lots = [], outs = new Map(), plan = shopBatchPlan(list);
+// 同一天的順序：當天開始前的盤點調整 → 入貨 → 銷售／報廢／領取 → 當天最後的盤點調整。planIn：批號推定（預設照 list 算）
+const shopRank = r => r.phase === 'open' ? -1 : r.phase === 'close' ? 2 : r.type === 'in' ? 0 : 1;
+function shopLedger(shop, list = data.shops, planIn = null) {
+  const recs = list.filter(r => r.shop === shop).sort((a, b) => cmp(a.date, b.date) || shopRank(a) - shopRank(b) || a.seq - b.seq);
+  const lots = [], outs = new Map(), plan = planIn || shopBatchPlan(list);
   for (const r of recs) {
     if (r.type === 'in') {
       // 門市確認過的（填批號、按確認、點選）＋沒確認的照總公司出貨扣批推定（可能拆成好幾個批號）
@@ -1439,8 +1448,8 @@ function shopLedger(shop, list = data.shops) {
       continue;
     }
     let need = r.quantity; const parts = [];
-    const cand = lots.filter(l => l.product === r.product && l.left > 0 && l.date <= r.date && (!r.batch || l.batch === r.batch) && (r.type !== 'sale' || l.expiry >= r.date)).sort((a, b) => cmp(a.expiry, b.expiry) || cmp(a.date, b.date));
-    const take = (l, want) => { const q = clampQty(Math.min(l.left, want)); if (q <= 0) return 0; l.left = clampQty(l.left - q); need = clampQty(need - q); const x = parts.find(y => y.batch === l.batch && y.expiry === l.expiry); if (x) x.q = clampQty(x.q + q); else parts.push({ batch: l.batch, expiry: l.expiry, q }); return q; };
+    const cand = lots.filter(l => l.product === r.product && l.left > 0 && l.date <= r.date && (!r.batch || l.batch === r.batch) && (!r.unk || !l.batch) && (r.type !== 'sale' || l.expiry >= r.date)).sort((a, b) => cmp(a.expiry, b.expiry) || cmp(a.date, b.date));
+    const take = (l, want) => { const q = clampQty(Math.min(l.left, want)); if (q <= 0) return 0; l.left = clampQty(l.left - q); need = clampQty(need - q); const x = parts.find(y => y.batch === l.batch && y.expiry === l.expiry && y.date === l.date); if (x) x.q = clampQty(x.q + q); else parts.push({ batch: l.batch, expiry: l.expiry, q, date: l.date }); return q; };
     // 匯入的 POS 銷售明細有批號（r.pref { 批號: 數量 }）：先扣那個批號，不夠或門市沒有那個批號才照先到期先扣（不會因為批號對不上就變缺口）
     if (r.pref && !r.batch) for (const [b, pq] of Object.entries(r.pref)) { let want = clampQty(Math.min(Number(pq) || 0, need)); for (const l of cand) { if (want <= 0) break; if (l.batch === b) want = clampQty(want - take(l, want)); } }
     for (const l of cand) { if (need <= 0) break; take(l, need); }
@@ -1490,7 +1499,8 @@ let shopPlanMemo = null;
 function shopBatchPlan(list = data.shops) {
   if (list === data.shops && shopPlanMemo && shopPlanMemo.data === data) return shopPlanMemo.plan;
   const pools = hqShipBatches(calculateLedger()), plan = new Map(), order = r => SHOPS.findIndex(s => s.id === r.shop);
-  const ins = list.filter(r => r.type === 'in').sort((a, b) => cmp(shopFrom(a), shopFrom(b)) || order(a) - order(b) || a.seq - b.seq);
+  for (const r of list) if (r.type === 'in' && r.aud) plan.set(r.id, r.batch ? [{ batch: r.batch, qty: r.quantity, confirmed: true, aud: true }] : [{ batch: '', qty: r.quantity, unknown: true, aud: true }]);
+  const ins = list.filter(r => r.type === 'in' && !r.aud).sort((a, b) => cmp(shopFrom(a), shopFrom(b)) || order(a) - order(b) || a.seq - b.seq);
   const poolOf = r => pools.get(shopFrom(r) + '|' + baseCode(r.product)) || [];
   const take = (p, need) => { const q = clampQty(Math.min(need, p.qty - p.used)); if (q > 1e-7) p.used = clampQty(p.used + q); return q > 1e-7 ? q : 0; };
   // 先扣掉門市確認過的批號（其他門市推定時就不會再分到）
@@ -1529,7 +1539,7 @@ function factoryBatches(product) {
 function shopSectionHtml(s) {
   const id = s.id, n = esc(s.name);
   return `<section id="shop-${id}" class="section">
-    <div class="stabs" id="stabs-${id}" role="tablist" aria-label="${n}門市分頁"><button type="button" role="tab" data-stab="recv">門市入貨確認</button><button type="button" role="tab" data-stab="entry">入貨／銷售／報廢匯入</button><button type="button" role="tab" data-stab="stock">門市庫存</button></div>
+    <div class="stabs" id="stabs-${id}" role="tablist" aria-label="${n}門市分頁"><button type="button" role="tab" data-stab="recv">門市入貨確認</button><button type="button" role="tab" data-stab="entry">入貨／銷售／報廢匯入</button><button type="button" role="tab" data-stab="stock">門市庫存</button><button type="button" role="tab" data-stab="audit">門市盤點</button></div>
     <div class="shop-pane" data-pane="recv">
     <div class="panel"><div class="panel-head"><div><h2>${n}門市入貨確認</h2><p id="rcvInfo-${id}"></p></div><div class="toolbar"><button type="button" class="btn small primary need-shop_${id}" data-action="ocr-slip" data-shop="${id}" title="用手機拍門市出庫單，自動讀品號、數量、製造日期，換成批號">拍出庫單辨識</button><input type="file" id="ocrFile-${id}" accept="image/*" capture="environment" hidden><button type="button" class="btn small need-storeout" data-action="store-out" title="讀揀貨總表的排單表，把各門市的出庫量帶入成入貨（批號自動推定）">從揀貨總表帶入入貨</button><input id="rcvDate-${id}" class="search" type="date" aria-label="入貨日期"></div></div><div id="rcvList-${id}" class="table-scroll"></div></div>
     </div>
@@ -1550,10 +1560,14 @@ function shopSectionHtml(s) {
     <div id="shopKpi-${id}" class="grid-kpi"></div>
     <div class="panel"><div class="panel-head"><div><h2>${n}門市庫存（依批號）</h2><p id="shopCount-${id}"></p></div><div class="toolbar"><div class="seg" id="shopSeg-${id}" role="group" aria-label="到期篩選"><button type="button" data-smode="all" class="on">全部</button><button type="button" data-smode="soon"><span class="seg-lab">快到期</span><span class="seg-n" hidden></span></button><button type="button" data-smode="expired">已過期<span class="seg-n" hidden></span></button></div><input id="shopFilter-${id}" class="search" type="search" placeholder="搜尋產品／批號" aria-label="搜尋${n}門市庫存"></div></div><div id="shopStock-${id}" class="table-scroll"></div></div>
     </div>
+    <div class="shop-pane" data-pane="audit">
+    <div class="panel"><div class="panel-head"><div><h2>${n}門市盤點</h2><p id="saudListInfo-${id}"></p></div><div class="toolbar"><button type="button" class="btn small primary need-shop_${id}" data-action="shop-aud-new" data-shop="${id}">＋ 新增盤點單</button></div></div><div class="panel-body"><p class="helper">照門市庫存盤點：每個產品＋批號一列（看盒子標籤上的批號），填實際數到的數量，App 算差異。跟帳上不一樣的按「套用盤點結果」：少的記成盤虧、多的記成盤盈，帳上就跟實盤一樣（門市沒有總表，App 直接調整）。<strong>第一次盤點當作期初</strong>：架上 11/17 以前進的舊貨也要盤，帳上沒有的批號按「新增一列」加。</p></div><div id="saudList-${id}" class="table-scroll"></div></div>
+    <div class="panel" id="saudSheet-${id}" hidden><div class="panel-head"><div><h2 id="saudTitle-${id}">盤點表</h2><p id="saudInfo-${id}"></p></div><div class="toolbar"><div class="seg" id="saudSeg-${id}" role="group" aria-label="盤點篩選"><button type="button" data-samode="all" class="on">全部</button><button type="button" data-samode="diff">有差異</button><button type="button" data-samode="todo">未盤完</button></div><input id="saudFilter-${id}" class="search" type="search" placeholder="搜尋品號／品名／批號" aria-label="搜尋${n}門市盤點表"><button type="button" class="btn small" data-action="shop-aud-csv" data-shop="${id}">匯出 CSV</button></div></div><div class="panel-body" id="saudActions-${id}"></div><div id="saudTable-${id}" class="table-scroll"></div></div>
+    </div>
   </section>`;
 }
-// 門市頁的三個分頁：recv 門市入貨確認｜entry 入貨／銷售／報廢匯入｜stock 門市庫存（記在這台瀏覽器）
-const SHOP_TABS = ['recv', 'entry', 'stock'];
+// 門市頁的四個分頁：recv 門市入貨確認｜entry 入貨／銷售／報廢匯入｜stock 門市庫存｜audit 門市盤點（記在這台瀏覽器）
+const SHOP_TABS = ['recv', 'entry', 'stock', 'audit'];
 const shopTab = Object.fromEntries(SHOPS.map(x => { let t = 'recv'; try { t = localStorage.getItem('fe_shoptab_' + x.id) || 'recv'; } catch (e) {} return [x.id, SHOP_TABS.includes(t) ? t : 'recv']; }));
 function applyShopTab(sid) {
   const sec = $('shop-' + sid); if (!sec) return;
@@ -1568,17 +1582,18 @@ function buildShops() {
 }
 const shopChip = (r, out, plan) => {
   const u = esc(getUnit(r.product)), short = out && out.short > 0, isIn = r.type === 'in', unk = shopUnknownQ(r, plan);
-  const cls = isIn ? (unk ? 'due' : 'ok') : short ? 'bad' : r.type === 'waste' ? 'expired' : r.type === 'take' ? 'due' : 'other';
+  const cls = isIn ? (unk ? 'due' : 'ok') : short ? 'bad' : r.type === 'waste' || r.type === 'loss' ? 'expired' : r.type === 'take' ? 'due' : 'other';
   const extra = isIn ? `（可販售到 ${esc(md(shopExp(r)))}）` : short ? `（缺 ${esc(fmt(out.short))}）` : '';
   const btxt = isIn ? shopInText(r, plan) : r.batch;
-  const tip = `${r.date}｜${SHOP_TYPES[r.type]} ${fmt(r.quantity)}${btxt ? '｜批號 ' + btxt : ''}${isIn ? '｜可販售到 ' + shopExp(r) : out ? '｜扣 ' + (shopPartsText(out.parts) || '—') + (short ? '｜缺 ' + fmt(out.short) : '') : ''}${r.note ? '｜' + r.note : ''}${r.by ? '｜' + r.by : ''}`;
-  return `<span class="pill ${cls} exp-chip" title="${esc(tip)}"><span class="mono">${esc(md(r.date))}</span> ${SHOP_TYPES[r.type]}${btxt ? ` <span class="mono">${esc(btxt)}</span>` : ''} ${esc(fmt(r.quantity))} ${u}${extra}</span>`;
+  const tip = `${r.date}｜${shopTypeLabel(r)} ${fmt(r.quantity)}${btxt ? '｜批號 ' + btxt : ''}${isIn ? '｜可販售到 ' + shopExp(r) : out ? '｜扣 ' + (shopPartsText(out.parts) || '—') + (short ? '｜缺 ' + fmt(out.short) : '') : ''}${r.note ? '｜' + r.note : ''}${r.by ? '｜' + r.by : ''}`;
+  return `<span class="pill ${cls} exp-chip" title="${esc(tip)}"><span class="mono">${esc(md(r.date))}</span> ${shopTypeLabel(r)}${btxt ? ` <span class="mono">${esc(btxt)}</span>` : ''} ${esc(fmt(r.quantity))} ${u}${extra}</span>`;
 };
 function renderShops(today) {
   const sr = sellRule(), inRange = (e, m, product) => { const st = sellStatus(product, e.expiry, today); return m === 'soon' ? st.d >= 0 && st.warn : st.d < 0; };
   for (const s of SHOPS) {
     const id = s.id, L = shopLedger(id), mode = shopMode[id], plan = shopBatchPlan();
     renderReceive(id, plan);
+    try { renderShopAudit(id); } catch (e) { console.error('門市盤點', e); }
     $('shopRule-' + id).innerHTML = `<strong>可販售期：</strong>入貨那天算第 1 天；<strong>蛋糕類 ${sr.cake.days} 天</strong>、第 ${sr.cake.warnFrom} 天起提醒；<strong>生巧克力 ${sr.choc.days} 天</strong>、第 ${sr.choc.warnFrom} 天起提醒（跟工廠的製作日期無關）。入貨會從<strong>揀貨總表</strong>帶入門市出庫，入貨日＝排單日（同步入口網站時一起帶，或按「從揀貨總表帶入入貨」；最近 3 天漏掉的會補），批號照總公司當天出貨扣掉交易明細（客人）後剩下的批號推定。銷售、報廢可以指定批號，沒指定就從最早到期的扣；過了可販售期的不能銷售，只能報廢。`;
     // 庫存：每個品號一列，每個「批號＋到期日」一個標籤（只算今天以前入貨的）
     const byP = new Map();
@@ -1615,7 +1630,7 @@ function renderShops(today) {
       ['已過期', `${nExp} 項`, nExp ? '請報廢下架' : '沒有', nExp ? 'bad' : ''],
     ].map(([l, v, d, c]) => `<article class="kpi ${c}"><div class="kpi-label">${esc(l)}</div><div class="kpi-value" style="font-size:20px">${esc(v)}</div><div class="kpi-desc">${esc(d)}</div></article>`).join('');
     // 紀錄：每個品號一列
-    const groups = groupByProduct(recs.map(r => ({ ...r, kind: SHOP_TYPES[r.type], btxt: r.type === 'in' ? shopInText(r, plan) : r.batch })), $('shopRecFilter-' + id).value, ['date', 'kind', 'note', 'btxt', 'expiryDate']);
+    const groups = groupByProduct(recs.map(r => ({ ...r, kind: shopTypeLabel(r), btxt: r.type === 'in' ? shopInText(r, plan) : r.batch })), $('shopRecFilter-' + id).value, ['date', 'kind', 'note', 'btxt', 'expiryDate']);
     const unkN = recs.filter(r => shopUnknownQ(r, plan) > 0).length;
     $('shopRecCount-' + id).textContent = `共 ${groups.length} 項產品、${recs.length} 筆紀錄；每個品號一列，日期新的在前（綠＝入貨、黃＝有批號不明、紅＝有缺口），「推定」＝照總公司出貨扣批推算的批號，點「明細」看每一筆或更正批號${unkN ? `；有 ${unkN} 筆入貨的批號推不出來（總公司當天這個品號的出貨不夠分）` : ''}`;
     $('shopRecs-' + id).innerHTML = table(['產品', '紀錄（日期新到舊）', '入貨#', '銷售#', '報廢#', '缺口#', '明細'], groups.map(g => {
@@ -1632,7 +1647,7 @@ async function openShopDetail(sid, product) {
     const o = L.outs.get(r.id), isIn = r.type === 'in', pt = String(r.id).startsWith('pt-');
     const bcell = isIn ? (r.batch ? `<span class="mono">${esc(r.batch)}</span>${r.editBy ? ' <span class="pill ok">已更正</span>' : ''}` : `<span class="mono">${esc(shopInText(r, plan))}</span>`) : `<span class="mono">${esc(r.batch || '先到期先扣')}</span>`;
     const btns = [isIn ? `<button type="button" class="btn small" data-action="shop-batch" data-shop="${sid}" data-id="${esc(r.id)}">${r.batch ? '改批號' : '更正批號'}</button>` : '', pt ? (String(r.id).startsWith('pt-in-') ? '<span class="pill other" title="揀貨總表帶入的數量，要修改請在揀貨總表改後再帶入一次">揀貨總表</span>' : '<span class="pill other" title="入口網站同步的數量，要修改請在入口網站改後再同步">入口網站</span>') : `<button type="button" class="btn small danger" data-action="shop-delete" data-shop="${sid}" data-id="${esc(r.id)}">刪除</button>`].filter(Boolean).join('');
-    return `<tr>${tdm(r.date)}${td(esc(SHOP_TYPES[r.type]))}${td(bcell)}<td class="num">${fmt(r.quantity)} ${u}</td>${td(esc(isIn ? '可販售到 ' + shopExp(r) + (shopFrom(r) !== r.date ? `（總公司 ${shopFrom(r)} 轉出）` : '') : (o && shopPartsText(o.parts)) || '—'))}<td class="num">${o && o.short ? fmt(o.short) : '—'}</td>${td(esc(r.note || '—'))}${tdWho(r)}${canEdit ? td(`<div class="segment">${btns}</div>`) : ''}</tr>`;
+    return `<tr>${tdm(r.date)}${td(esc(shopTypeLabel(r)))}${td(bcell)}<td class="num">${fmt(r.quantity)} ${u}</td>${td(esc(isIn ? '可販售到 ' + shopExp(r) + (shopFrom(r) !== r.date ? `（總公司 ${shopFrom(r)} 轉出）` : '') : (o && shopPartsText(o.parts)) || '—'))}<td class="num">${o && o.short ? fmt(o.short) : '—'}</td>${td(esc(r.note || '—'))}${tdWho(r)}${canEdit ? td(`<div class="segment">${btns}</div>`) : ''}</tr>`;
   }));
   await modal({ title: `${shopName(sid)}門市「${product}」的紀錄（${rows.length} 筆）`, html: `<div class="table-scroll">${html}</div>`, ok: '關閉', wide: true, noCancel: true });
 }
@@ -1655,7 +1670,7 @@ async function deleteShopRec(sid, id) {
   closeModal();
   if (!can(shopPerm(sid))) return;
   const r = data.shops.find(x => x.id === id && x.shop === sid); if (!r) return;
-  if (!await modal({ title: '刪除這筆門市紀錄？', html: `<p>${esc(`${shopName(sid)}門市｜${r.date}｜${SHOP_TYPES[r.type]} ${r.product}${r.batch ? ' 批號 ' + r.batch : ''} ${fmt(r.quantity)} ${getUnit(r.product)}${r.type === 'in' ? '｜可販售到 ' + shopExp(r) : ''}`)}</p><p class="modal-note">刪除後，這間門市的庫存與扣除會重新計算。</p>`, ok: '刪除', danger: true })) return;
+  if (!await modal({ title: '刪除這筆門市紀錄？', html: `<p>${esc(`${shopName(sid)}門市｜${r.date}｜${shopTypeLabel(r)} ${r.product}${r.batch ? ' 批號 ' + r.batch : ''} ${fmt(r.quantity)} ${getUnit(r.product)}${r.type === 'in' ? '｜可販售到 ' + shopExp(r) : ''}`)}</p><p class="modal-note">刪除後，這間門市的庫存與扣除會重新計算。</p>`, ok: '刪除', danger: true })) return;
   act(() => { FEStore.remove('shop', r.id); toast('已刪除，門市庫存已重算'); });
 }
 /* ---------- 門市出庫（揀貨總表）→ 門市入貨 ----------
@@ -1762,13 +1777,13 @@ function hqCandidates(product, date) {
   for (const l of led(date).lots) if (l.product === product && l.entryDate === date) { const b = lab(l); if (b) set.add(b); }
   const out = [...set].sort(); candMemo.out.set(key, out); return out;
 }
-function rcvDay(sid) { if (isDate(rcvDate[sid])) return rcvDate[sid]; const t = TODAY(), ds = [...new Set(data.shops.filter(r => r.shop === sid && r.type === 'in' && r.date <= t).map(r => r.date))].sort(); return ds.length ? ds[ds.length - 1] : t; }
+function rcvDay(sid) { if (isDate(rcvDate[sid])) return rcvDate[sid]; const t = TODAY(), ds = [...new Set(data.shops.filter(r => r.shop === sid && r.type === 'in' && !r.aud && r.date <= t).map(r => r.date))].sort(); return ds.length ? ds[ds.length - 1] : t; }
 // 待確認品項：每個可能的批號一格數量（先填推定的），門市照盒子上的批號改數量，合計要等於入貨數量，再按「確認」
 // rcvDraft：還沒按確認前改的數量（畫面重新整理時保留）
 const rcvDraft = {};
 function renderReceive(sid, plan) {
   const day = rcvDay(sid), di = $('rcvDate-' + sid); if (document.activeElement !== di) di.value = day;
-  const recs = data.shops.filter(r => r.shop === sid && r.type === 'in' && r.date === day).sort((a, b) => productOrder(a.product, b.product)), edit = can(shopPerm(sid));
+  const recs = data.shops.filter(r => r.shop === sid && r.type === 'in' && !r.aud && r.date === day).sort((a, b) => productOrder(a.product, b.product)), edit = can(shopPerm(sid));
   const shipPools = recs.length ? hqShipBatches(calculateLedger()) : new Map();
   let done = 0, auto = 0, wait = 0;
   const rows = recs.map(r => {
@@ -1946,6 +1961,148 @@ async function ocrPreview(sid, slip, text) {
     rcvDate[sid] = res.date;
   });
   toast(`已套用 ${by.size} 個品項的批號${miss.length ? `；對不到：${miss.join('、')}` : ''}${warn.length ? `；數量跟入貨不一樣（以出庫單為準，多的部分不算）：${warn.join('、')}` : ''}`, !!(miss.length || warn.length), miss.length || warn.length ? 10000 : 4000);
+}
+/* ---------- 門市盤點（2026-11-20 起，每間門市頁的「門市盤點」分頁） ----------
+   盤點單（audit 的 type 'session'，有 shop）：日期＋時間點（end＝當天結束、start＝當天開始前）＋狀態。
+   實盤（type 'count'，有 shop）：每個產品＋批號一列（批號不明的一列），key＝「P|產品|批號」；實盤新增的列可以填入貨日（sellFrom，盤盈的可販售期第 1 天）。
+   帳上：盤點時間點的門市庫存（當天結束＝含當天；當天開始前＝前一天結束），這張盤點單自己的調整也算進去，所以套用後就會一致。
+   差異處理（門市沒有總表，App 自己調）：每個產品每列都盤了、跟帳上不一樣 →「套用盤點結果」：
+     少的 → 盤虧（type 'loss'，照那個批號扣；批號不明的只扣批號不明的）
+     多的 → 盤盈（type 'in'＋aud，批號照實盤）；同一個產品有盤虧的（其實是同一批貨、批號推定錯）照扣掉的那幾批的入貨日當可販售期第 1 天（可販售到不變），
+            剩下真的多出來的（例如期初盤點的舊貨）用實盤時填的入貨日，沒填就保守用批號的製造日期，都沒有用盤點日。
+     記在盤點日：當天結束的盤點記在當天最後（phase close），當天開始前的記在當天最一開始（phase open）。可以「取消這張的調整」還原。 */
+const shopAudSel = {}, shopAudMode = Object.fromEntries(SHOPS.map(s => [s.id, 'all']));
+let shopAudDirty = false;
+const shopAudSessions = sid => data.audits.filter(r => r.type === 'session' && r.shop === sid).sort((a, b) => cmp(b.date, a.date) || b.seq - a.seq);
+const shopAudSession = sid => shopAudSessions(sid).find(r => r.id === shopAudSel[sid]) || shopAudSessions(sid)[0] || null;
+const shopAudKey = (product, batch) => `P|${product}|${batch || ''}`;
+const shopAudAdj = sess => data.shops.filter(r => r.aud === sess.id);
+function shopAudBook(sess) {
+  const sid = sess.shop, list = data.shops.filter(r => r.shop === sid && (r.date < sess.date || (sess.phase === 'end' && r.date === sess.date) || r.aud === sess.id));
+  const L = shopLedger(sid, list, shopBatchPlan()), m = new Map();
+  for (const l of L.lots) {
+    if (!(l.left > 1e-7)) continue;
+    const key = shopAudKey(l.product, l.batch), x = m.get(key) || { key, product: l.product, batch: l.batch || '', book: 0, exps: new Set(), guess: false };
+    x.book = clampQty(x.book + l.left); x.exps.add(l.expiry); if (l.guess && l.batch) x.guess = true; m.set(key, x);
+  }
+  return m;
+}
+function shopAudSheet(sess) {
+  const book = shopAudBook(sess), counts = new Map(data.audits.filter(r => r.type === 'count' && r.session === sess.id).map(r => [r.key, r]));
+  const lines = new Map([...book.values()].map(x => [x.key, { ...x, count: null, rec: null }]));
+  for (const [k, c] of counts) { const x = lines.get(k) || { key: k, product: c.product, batch: c.batch || '', book: 0, exps: new Set(), guess: false, added: true }; x.count = c.qty; x.rec = c; if (c.sellFrom) x.sellFrom = c.sellFrom; lines.set(k, x); }
+  const byP = new Map(); for (const x of lines.values()) { if (!byP.has(x.product)) byP.set(x.product, []); byP.get(x.product).push(x); }
+  const prods = [...byP.entries()].map(([product, list]) => {
+    list.sort((a, b) => (a.batch ? 0 : 1) - (b.batch ? 0 : 1) || cmp(batchDate(a.batch) || a.batch, batchDate(b.batch) || b.batch));
+    const counted = list.filter(x => x.count !== null), bk = sumQ(list, x => x.book), cn = sumQ(counted, x => x.count);
+    const st = !counted.length ? 'todo' : counted.length < list.length ? 'partial' : list.every(x => Math.abs(x.count - x.book) < 1e-7) ? 'ok' : Math.abs(cn - bk) < 1e-7 ? 'dist' : 'total';
+    return { product, list, g: { st, book: bk, cnt: cn, counted: counted.length, n: list.length } };
+  }).sort((a, b) => productOrder(a.product, b.product));
+  return { prods };
+}
+const SAUD_ST = { todo: ['未盤', 'other'], partial: ['盤點中', 'due'], ok: ['一致', 'ok'], dist: ['批號不同（總數一樣）', 'due'], total: ['總數不同', 'bad'] };
+function renderShopAudit(sid) {
+  const listEl = $('saudList-' + sid); if (!listEl) return;
+  const ss = shopAudSessions(sid), sess = shopAudSession(sid), editP = can(shopPerm(sid));
+  $('saudListInfo-' + sid).textContent = ss.length ? `共 ${ss.length} 張盤點單，點一下打開` : '還沒有盤點單，按右邊「新增盤點單」開始。第一次盤點（期初盤點）請把架上所有的貨都盤，包含 App 帳上沒有的舊貨';
+  listEl.innerHTML = ss.length ? table(['盤點日期', '時間點', '狀態', '調整', '建立人', ''], ss.map(r => `<tr${sess && r.id === sess.id ? ' class="row-on"' : ''}>${tdm(r.date)}${td(r.phase === 'start' ? '當天開始前' : '當天結束')}${td(r.status === 'done' ? badge('已完成', 'ok') : badge('盤點中', 'due'))}${td(shopAudAdj(r).length ? `${shopAudAdj(r).length} 筆` : '—')}${td(esc(r.by || '—'))}${td(`<button type="button" class="btn small" data-action="shop-aud-open" data-shop="${sid}" data-id="${esc(r.id)}">${sess && r.id === sess.id ? '目前這張' : '打開'}</button>`)}</tr>`), '') : '';
+  const panel = $('saudSheet-' + sid); panel.hidden = !sess; if (!sess) return;
+  const tbl = $('saudTable-' + sid);
+  if (tbl.contains(document.activeElement) && document.activeElement.matches('[data-saud]')) { shopAudDirty = true; return; }
+  const { prods } = shopAudSheet(sess), edit = editP && sess.status !== 'done', mode = shopAudMode[sid], cnt = st => prods.filter(p => p.g.st === st).length;
+  document.querySelectorAll(`#saudSeg-${sid} [data-samode]`).forEach(b => b.classList.toggle('on', b.dataset.samode === mode));
+  const adj = shopAudAdj(sess), need = prods.filter(p => p.g.st === 'dist' || p.g.st === 'total');
+  $('saudTitle-' + sid).textContent = `盤點表：${sess.date}（${sess.phase === 'start' ? '當天開始前' : '當天結束'}）`;
+  $('saudInfo-' + sid).textContent = `${sess.status === 'done' ? '已完成' : '盤點中'}｜帳上＝${sess.phase === 'start' ? `${addDays(sess.date, -1)} 結束` : `${sess.date} 結束`}的門市庫存｜一致 ${cnt('ok')} 項、批號不同 ${cnt('dist')} 項、總數不同 ${cnt('total')} 項、盤點中 ${cnt('partial')} 項、未盤 ${cnt('todo')} 項`;
+  $('saudActions-' + sid).innerHTML = [
+    need.length ? `<div class="notice warning"><strong>跟帳上不一樣 ${need.length} 項</strong>：${esc(need.map(p => `${productCodeOf(p.product)}（帳上 ${fmt(p.g.book)}／實盤 ${fmt(p.g.cnt)}）`).join('、'))}。按「套用盤點結果」會讓帳上照實盤：少的記成盤虧、多的記成盤盈（門市沒有總表，App 直接調整）。還沒盤完的品項不會調整。${editP ? ' <button type="button" class="btn small primary" data-action="shop-aud-apply" data-shop="' + sid + '">套用盤點結果</button>' : ''}</div>` : '',
+    adj.length ? `<div class="notice">這張盤點單做過 ${adj.length} 筆調整（盤虧 ${adj.filter(r => r.type === 'loss').length} 筆、盤盈 ${adj.filter(r => r.type === 'in').length} 筆${sess.appliedAt ? `，${esc(new Date(sess.appliedAt).toLocaleString('zh-TW'))}` : ''}${sess.appliedBy ? '，' + esc(sess.appliedBy) : ''}），在「入貨／銷售／報廢匯入」分頁的紀錄看得到。${editP ? ` <button type="button" class="btn small danger" data-action="shop-aud-unapply" data-shop="${sid}">取消這張的調整</button>` : ''}</div>` : '',
+    editP ? `<div class="form-actions">${edit ? `<button type="button" class="btn small" data-action="shop-aud-add" data-shop="${sid}">＋ 新增一列（帳上沒有的批號）</button><button type="button" class="btn small primary" data-action="shop-aud-done" data-shop="${sid}">完成盤點</button>` : `<button type="button" class="btn small" data-action="shop-aud-reopen" data-shop="${sid}">重新開啟</button>`}<button type="button" class="btn small danger" data-action="shop-aud-delete" data-shop="${sid}">刪除盤點單</button></div>` : ''].join('');
+  const q = clean($('saudFilter-' + sid).value).toLowerCase();
+  const show = p => { if (mode === 'diff' && !(p.g.st === 'dist' || p.g.st === 'total' || p.list.some(x => x.count !== null && Math.abs(x.count - x.book) > 1e-7))) return false; if (mode === 'todo' && !(p.g.st === 'todo' || p.g.st === 'partial')) return false; return !q || p.product.toLowerCase().includes(q) || p.list.some(x => x.batch.toLowerCase().includes(q)); };
+  const rows = [];
+  for (const p of prods.filter(show)) {
+    const u = esc(getUnit(p.product));
+    rows.push(`<tr class="aud-prod"><td colspan="5"><strong>${esc(p.product)}</strong>　${badge(SAUD_ST[p.g.st][0], SAUD_ST[p.g.st][1])} <span class="who">帳上 ${fmt(p.g.book)}／實盤 ${p.g.counted ? fmt(p.g.cnt) : '—'}</span></td></tr>`);
+    for (const x of p.list) {
+      const d = x.count === null ? null : clampQty(x.count - x.book), exps = [...x.exps].sort(), gone = exps.length && exps[0] < sess.date;
+      const expTxt = exps.length ? exps.map(md).join('、') : x.added ? `（入貨日 ${md(x.sellFrom || batchDate(x.batch) || sess.date)}）` : '—';
+      rows.push(`<tr>${td(`<span class="mono">${esc(x.batch || '批號不明')}</span>${x.guess ? ' ' + badge('推定', 'other') : ''}${x.added ? ' ' + badge('實盤新增', 'due') : ''}`)}${td(`<span class="mono">${esc(expTxt)}</span>${gone ? ' ' + badge('已過期', 'expired') : ''}`)}<td class="num">${fmt(x.book)} ${u}</td><td class="num">${edit ? `<input class="aud-in" type="number" inputmode="numeric" min="0" step="1" value="${x.count === null ? '' : esc(x.count)}" placeholder="未盤" data-saud="${esc(x.key)}" data-shop="${sid}" aria-label="${esc(p.product)} ${esc(x.batch || '批號不明')} 實盤">` : (x.count === null ? '—' : fmt(x.count))}</td><td class="num">${d === null ? '—' : Math.abs(d) < 1e-7 ? badge('0', 'ok') : badge((d > 0 ? '＋' : '－') + fmt(Math.abs(d)), 'bad')}</td></tr>`);
+    }
+  }
+  tbl.innerHTML = table(['批號', '可販售到', '帳上#', '實盤#', '差異#'], rows, mode === 'all' ? '這個盤點時間點門市沒有庫存；帳上沒有的貨按「新增一列」加' : '沒有符合的品項');
+}
+function shopAudSave(el) {
+  const sid = el.dataset.shop, sess = shopAudSession(sid); if (!sess || sess.status === 'done' || !can(shopPerm(sid))) return;
+  const key = el.dataset.saud, line = shopAudSheet(sess).prods.flatMap(p => p.list).find(x => x.key === key); if (!line) return;
+  const v = el.value.trim(), id = `scnt-${sess.id}-${key}`;
+  if (v === '') { if (line.rec) act(() => FEStore.remove('audit', line.rec.id)); return; }
+  const n = Number(v); if (!Number.isFinite(n) || n < 0) { toast('實盤數量要是 0 以上的數字', true); return; }
+  act(() => FEStore.save('audit', { id, type: 'count', shop: sid, session: sess.id, date: sess.date, key, product: line.product, pool: 'stock', batch: line.batch, qty: n, added: !!line.added, ...(line.sellFrom ? { sellFrom: line.sellFrom } : {}), ...(line.rec ? { by: line.rec.by, at: line.rec.at, ...stampEdit() } : stampNew()) }));
+}
+async function shopAudNew(sid) {
+  if (!can(shopPerm(sid))) return;
+  const res = await modal({ title: `${shopName(sid)}門市：新增盤點單`, ok: '建立', html: `<div class="field"><label for="san-date">盤點日期</label><input id="san-date" type="date" value="${TODAY()}"></div><div class="field"><label for="san-phase">時間點</label><select id="san-phase"><option value="end">當天結束（已扣當天銷售，打烊後盤）</option><option value="start">當天開始前（開店前、還沒收貨前盤）</option></select></div><p class="modal-note">帳上數量照門市庫存在這個時間點的數字，每個產品＋批號一列。第一次盤點（期初盤點）請把架上所有的貨都盤，帳上沒有的批號按「新增一列」加。</p><p class="modal-error" hidden></p>`, collect: b => { const date = b.querySelector('#san-date').value, phase = b.querySelector('#san-phase').value; if (!isDate(date)) throw Error('請選盤點日期'); return { date, phase }; } });
+  if (!res) return;
+  const id = 'saud' + uid().replace(/[^A-Za-z0-9]/g, '').slice(-10);
+  act(() => { FEStore.save('audit', { id, type: 'session', shop: sid, seq: nextSeq(), date: res.date, phase: res.phase, status: 'open', note: '', ...stampNew() }); shopAudSel[sid] = id; toast(`已建立${shopName(sid)} ${res.date} 的盤點單，開始填實盤數量`); });
+}
+async function shopAudAddLine(sid) {
+  const sess = shopAudSession(sid); if (!sess || sess.status === 'done' || !can(shopPerm(sid))) return;
+  const res = await modal({ title: '新增一列（帳上沒有的批號）', ok: '加入', html: `<div class="field"><label for="sal-product">產品</label><input id="sal-product" list="productNames" placeholder="輸入品號或品名" autocomplete="off"></div><div class="field"><label for="sal-batch">批號（盒子標籤上的；看不到就空白＝批號不明）</label><input id="sal-batch" placeholder="例如 CKAS9901" maxlength="30" style="text-transform:uppercase"></div><div class="field"><label for="sal-from">入貨日（可販售期的第 1 天；不知道就空白＝用批號的製造日期）</label><input id="sal-from" type="date"></div><div class="field"><label for="sal-qty">實盤數量</label><input id="sal-qty" type="number" min="0" step="1" inputmode="numeric"></div><p class="modal-note">多出來的貨套用後會記成「盤盈」。入貨日不知道時用批號的製造日期（最早可能的入貨日，可販售期比較保守）；批號也看不到就用盤點日。</p><p class="modal-error" hidden></p>`,
+    collect: b => {
+      const p = getProduct(b.querySelector('#sal-product').value), batch = cleanBatch(b.querySelector('#sal-batch').value), from = b.querySelector('#sal-from').value, qty = Number(b.querySelector('#sal-qty').value);
+      if (!p) throw Error('請從清單選產品'); if (from && (!isDate(from) || from > sess.date)) throw Error('入貨日要在盤點日（含）以前'); if (!(qty >= 0) || !Number.isFinite(qty) || b.querySelector('#sal-qty').value === '') throw Error('請填實盤數量');
+      return { product: p.name, batch, from, qty };
+    } });
+  if (!res) return;
+  const key = shopAudKey(res.product, res.batch), old = data.audits.find(r => r.type === 'count' && r.session === sess.id && r.key === key);
+  act(() => { FEStore.save('audit', { id: `scnt-${sess.id}-${key}`, type: 'count', shop: sid, session: sess.id, date: sess.date, key, product: res.product, pool: 'stock', batch: res.batch, qty: res.qty, added: old ? !!old.added : !shopAudBook(sess).has(key), ...(res.from ? { sellFrom: res.from } : {}), ...stampNew() }); toast('已加入'); });
+}
+// 套用盤點結果要新增的紀錄（還沒存）
+function shopAudPlan(sess) {
+  const { prods } = shopAudSheet(sess), date = sess.date, phase = sess.phase === 'start' ? 'open' : 'close', who = myName(), at = nowIso(), outs = [], ins = [];
+  for (const p of prods) { if (p.g.st !== 'dist' && p.g.st !== 'total') continue; for (const x of p.list) { const d = clampQty(x.count - x.book); if (d < -1e-7) outs.push({ x, q: -d }); else if (d > 1e-7) ins.push({ x, q: d }); } }
+  let n = shopAudAdj(sess).length;
+  const base = (x, q) => ({ id: `saud-${sess.id}-${++n}`, shop: sess.shop, date, product: x.product, quantity: q, batch: x.batch || '', aud: sess.id, phase, seq: nextSeq(), by: who, at });
+  const loss = outs.map(o => ({ ...base(o.x, o.q), type: 'loss', ...(o.x.batch ? {} : { unk: true }), note: `盤點盤虧（${sess.date}）` }));
+  // 盤虧扣掉的是哪幾天入貨的（同一個產品的盤盈照這些入貨日，可販售到不變）
+  const L = shopLedger(sess.shop, [...data.shops, ...loss]), src = new Map();
+  for (const r of loss) for (const pt of ((L.outs.get(r.id) || {}).parts || [])) { if (!pt.date) continue; const a = src.get(r.product) || []; a.push({ date: pt.date, q: pt.q }); src.set(r.product, a); }
+  const gain = [];
+  for (const i of ins) {
+    let need = i.q;
+    for (const s of (src.get(i.x.product) || [])) { if (need <= 1e-7) break; if (s.q <= 1e-7) continue; const q = clampQty(Math.min(need, s.q)); s.q = clampQty(s.q - q); need = clampQty(need - q); gain.push({ ...base(i.x, q), type: 'in', sellFrom: s.date, expiryDate: shopExpiryFor(i.x.product, s.date), note: `盤點盤盈（${sess.date}，批號照實盤）` }); }
+    if (need > 1e-7) { let sf = i.x.sellFrom || batchDate(i.x.batch) || date; if (sf > date) sf = date; gain.push({ ...base(i.x, need), type: 'in', sellFrom: sf, expiryDate: shopExpiryFor(i.x.product, sf), note: `盤點盤盈（${sess.date}）` }); }
+  }
+  return { loss, gain };
+}
+async function shopAudApply(sid) {
+  const sess = shopAudSession(sid); if (!sess || !can(shopPerm(sid))) return;
+  const { loss, gain } = shopAudPlan(sess); if (!loss.length && !gain.length) { toast('沒有要調整的（每列都盤完、跟帳上不一樣的品項才會調整）'); return; }
+  const li = r => `<li>${esc(productCodeOf(r.product))} ${r.type === 'loss' ? '盤虧 －' : '盤盈 ＋'}${fmt(r.quantity)}　${esc(r.batch || '批號不明')}${r.type === 'in' ? `・可販售到 ${md(shopExpiryFor(r.product, r.sellFrom))}（入貨日 ${md(r.sellFrom)}）` : ''}</li>`;
+  if (!await modal({ title: '套用盤點結果', ok: '套用', html: `<p>會新增 ${loss.length + gain.length} 筆調整（記在 ${esc(sess.date)} ${sess.phase === 'start' ? '最一開始' : '最後'}），讓帳上照實盤：</p><ul>${[...loss, ...gain].map(li).join('')}</ul><p class="modal-note">同一個產品有少有多（批號推定錯、其實是同一批貨）的，多的照扣掉的那幾批的入貨日，可販售到不變；真的多出來的用實盤時填的入貨日，沒填就用批號的製造日期（保守）。之後可以按「取消這張的調整」還原。</p>` })) return;
+  act(() => { FEStore.saveMany('shop', [...loss, ...gain]); FEStore.save('audit', { ...sess, appliedAt: Date.now(), appliedBy: myName(), ...stampEdit() }); toast(`已套用：盤虧 ${loss.length} 筆、盤盈 ${gain.length} 筆，帳上已跟實盤一致`); });
+}
+async function shopAudUnapply(sid) {
+  const sess = shopAudSession(sid); if (!sess || !can(shopPerm(sid))) return;
+  const ids = shopAudAdj(sess).map(r => r.id); if (!ids.length) return;
+  if (!await modal({ title: '取消這張的調整？', ok: '取消調整', danger: true, html: `<p>會刪掉這張盤點單做的 ${ids.length} 筆盤虧／盤盈，帳上回到調整前。</p>` })) return;
+  act(() => { FEStore.removeMany('shop', ids); FEStore.save('audit', { ...sess, appliedAt: '', appliedBy: '', ...stampEdit() }); toast('已取消這張盤點單的調整'); });
+}
+function shopAudStatus(sid, status) { const sess = shopAudSession(sid); if (!sess || !can(shopPerm(sid))) return; act(() => { FEStore.save('audit', { ...sess, status, ...stampEdit() }); toast(status === 'done' ? '盤點單已完成（不能再改實盤；要改請按「重新開啟」）' : '已重新開啟盤點單'); }); }
+async function shopAudDelete(sid) {
+  const sess = shopAudSession(sid); if (!sess || !can(shopPerm(sid))) return;
+  const cnts = data.audits.filter(r => r.type === 'count' && r.session === sess.id).map(r => r.id), adj = shopAudAdj(sess).length;
+  if (!await modal({ title: '刪除這張盤點單？', ok: '刪除', danger: true, html: `<p>${esc(shopName(sid))} ${esc(sess.date)}（${sess.phase === 'start' ? '當天開始前' : '當天結束'}）的盤點單與 ${cnts.length} 筆實盤數量會刪除，不能復原。</p>${adj ? `<p class="modal-note">這張做過的 ${adj} 筆盤虧／盤盈不會刪掉；要還原請先按「取消這張的調整」。</p>` : ''}` })) return;
+  act(() => { FEStore.removeMany('audit', [sess.id, ...cnts]); shopAudSel[sid] = ''; toast('已刪除盤點單'); });
+}
+function shopAudCsv(sid) {
+  const sess = shopAudSession(sid); if (!sess) return;
+  const rows = [];
+  for (const p of shopAudSheet(sess).prods) for (const x of p.list) rows.push([shopName(sid), p.product, getUnit(p.product), x.batch || '批號不明', x.guess ? '推定' : '', [...x.exps].sort().join(' '), x.book, x.count === null ? '' : x.count, x.count === null ? '' : clampQty(x.count - x.book), SAUD_ST[p.g.st][0], x.added ? '實盤新增' : '', x.rec ? (x.rec.editBy || x.rec.by) : '']);
+  const content = '﻿' + [['門市', '產品', '單位', '批號', '批號來源', '可販售到', '帳上', '實盤', '差異', '這項狀態', '備註', '盤點人'], ...rows].map(r => r.map(csvEscape).join(',')).join('\r\n');
+  downloadFile(`門市盤點_${shopName(sid)}_${sess.date}_${sess.phase === 'start' ? '開始前' : '結束'}.csv`, content, 'text/csv;charset=utf-8', '盤點表 CSV 已下載');
 }
 /* ---------- 門市批次匯入（銷售／報廢） ----------
    選檔案（POS 銷售明細 Excel／CSV）或從 Excel 複製貼上，欄位規則見 parseShopPaste。存成那天的銷售（或報廢）紀錄，id imp-類別-門市-日期-品號：
@@ -2586,6 +2743,9 @@ async function handleAction(el) {
   if (a === 'store-out') return syncStoreOut(storeOutDates());
   if (a === 'tx-import' || a === 'sys-import') return openSysImport();
   if (a === 'tx-rematch') return txRematchNow();
+  if (a.startsWith('shop-aud-')) { const sid = el.dataset.shop, k = a.slice(9);
+    if (k === 'new') return shopAudNew(sid); if (k === 'open') { shopAudSel[sid] = el.dataset.id; return scheduleRender(); } if (k === 'add') return shopAudAddLine(sid); if (k === 'apply') return shopAudApply(sid); if (k === 'unapply') return shopAudUnapply(sid);
+    if (k === 'done') return shopAudStatus(sid, 'done'); if (k === 'reopen') return shopAudStatus(sid, 'open'); if (k === 'delete') return shopAudDelete(sid); if (k === 'csv') return shopAudCsv(sid); return; }
   if (a === 'chk-go') { const v = el.dataset.view, d = el.dataset.date; if (v === 'allocations') { if (isDate(d)) allocDate = d; return go('allocations'); } if (v.startsWith('shop-')) { const sid = v.slice(5); if (isDate(d)) { rcvDate[sid] = d; } return go(v); } return go(v); }
   if (a.startsWith('detail-')) return openDetail(a.slice(7), id);
   if (a === 'edit-opening') { closeModal(); return can('produce') && populateEdit('opening', id); }
@@ -2603,7 +2763,8 @@ async function handleAction(el) {
 }
 function bind() {
   document.addEventListener('input', e => { const el = e.target.closest && e.target.closest('[data-rq]'); if (el) rcvInput(el); });
-  document.addEventListener('change', e => { const el = e.target.closest && e.target.closest('[data-aud]'); if (el) auditSave(el); });
+  document.addEventListener('change', e => { const el = e.target.closest && e.target.closest('[data-aud]'); if (el) auditSave(el); const sl = e.target.closest && e.target.closest('[data-saud]'); if (sl) shopAudSave(sl); });
+  document.addEventListener('focusout', e => { if (e.target.matches && e.target.matches('[data-saud]') && shopAudDirty) { shopAudDirty = false; setTimeout(scheduleRender, 50); } });
   document.addEventListener('focusout', e => { if (e.target.matches && e.target.matches('[data-aud]') && auditDirty) setTimeout(scheduleRender, 50); });
   document.addEventListener('click', e => {
     const el = e.target.closest('[data-action]'); if (el) { e.preventDefault(); handleAction(el); return; }
@@ -2637,6 +2798,8 @@ function bind() {
     $('stabs-' + id).addEventListener('click', e => { const b = e.target.closest('[data-stab]'); if (b) setShopTab(id, b.dataset.stab); });
     $('ocrFile-' + id).addEventListener('change', e => { const f = e.target.files && e.target.files[0]; if (f) ocrSlip(id, f); });
     $('rcvDate-' + id).addEventListener('change', e => { if (isDate(e.target.value)) { rcvDate[id] = e.target.value; scheduleRender(); } });
+    $('saudSeg-' + id).addEventListener('click', e => { const b = e.target.closest('[data-samode]'); if (!b) return; shopAudMode[id] = b.dataset.samode; scheduleRender(); });
+    $('saudFilter-' + id).addEventListener('input', scheduleRender);
   }
   $('settingsForm').addEventListener('submit', e => { e.preventDefault(); if (!can('setting')) return; const mw = Number($('semiWarn').value), sh = Number($('defaultShelf').value), k = Number($('stockDays').value), kw = Number($('stockWarn').value); if (!Number.isInteger(mw) || mw < 1 || mw > 365 || !Number.isInteger(sh) || sh < 0 || sh > 36500) { toast('請填寫有效的半成品警示天數（1～365）與保存天數（整數）', true); return; } if (!Number.isInteger(k) || k < 1 || k > 365 || !Number.isInteger(kw) || kw < 0 || kw > 60) { toast('現貨可放天數要是 1～365、現貨提醒天數要是 0～60 的整數', true); return; } act(() => { FEStore.save('settings', { id: 'main', warnDays: data.settings.warnDays, defaultShelf: sh, stockDays: k, stockWarn: kw, semiWarn: mw }); toast(`系統設定已儲存：現貨可放 ${k} 天、剩 ${kw} 天內提醒；半成品剩 ${mw} 天內警示`); }); });
   for (const id of ['oMfg', 'oShelf']) $(id).addEventListener('change', () => autoExpiry('o')); $('oProduct').addEventListener('change', () => productDefaults('o'));
