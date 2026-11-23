@@ -312,8 +312,9 @@ function calculateLedger(asOf = '9999-12-31', st = data) {
     const use = (lot, amount) => { lot.remaining = clampQty(lot.remaining - amount); lot.used = clampQty(lot.used + amount); lot.shipped = clampQty(lot.shipped + amount); };
     // 有匯入那天的交易明細：同一天、同一個品號第一段（例如 CA-25 和 CA-25|YC-09）的出貨一起扣，第一筆出貨時整組一次算完
     //   ① 明細的批號：誰的庫存有那個批號就由誰扣（組合品和單品各有各的批）；庫存裡沒有或不夠的記成「批號對不上」（txMiss），
-    //      數量照樣照先到期先出改扣別批（2026-11-20 起：數量以總表為準，庫存才會跟總表一致；改扣的算客人的，標 tx、txSub，不分給門市）
-    //   ② 明細沒寫批號、或明細比總表少的部分（txNone）照先到期先出（這部分是寄門市等，分給門市推定批號）
+    //      數量照樣改扣別批（2026-11-20 起：數量以總表為準，庫存才會跟總表一致；改扣的算客人的，標 tx、txSub，不分給門市）
+    //   ② 明細沒寫批號、或明細比總表少的部分（txNone＝寄門市等）：剩下的批號拿最舊的（先到期先出），分給門市推定批號
+    //   ③ 最後才改扣 ① 批號對不上的數量（門市先拿最舊的，2026-11-23 起）
     const gk = e.date + '|' + baseCode(x.product), pool = txPool.get(gk);
     if (pool) {
       if (txDone.has(gk)) continue;
@@ -328,10 +329,10 @@ function calculateLedger(asOf = '9999-12-31', st = data) {
       }
       for (const g of grp) {
         const missQ = clampQty(Object.values(g.miss).reduce((t, v) => t + v, 0)); g.none = Math.max(0, clampQty(g.remaining - missQ));
-        // 先改扣批號對不上的（客人的），再扣明細沒涵蓋的（寄門市等）
-        let sub = missQ;
-        for (const lot of g.elig) { if (sub <= 1e-7 || g.remaining <= 1e-7) break; if (lot.remaining <= 1e-7) continue; const q = clampQty(Math.min(sub, g.remaining, lot.remaining)); take(g, lot, q, true); g.allocations[g.allocations.length - 1].txSub = true; sub = clampQty(sub - q); }
-        for (const lot of g.elig) { if (g.remaining <= 1e-7) break; if (lot.remaining <= 1e-7) continue; take(g, lot, clampQty(Math.min(g.remaining, lot.remaining)), false); }
+        // 扣掉明細（客人）的批號後，剩下的最舊的先給明細沒涵蓋的（寄門市等）；批號對不上的（客人的）最後才改扣
+        let rest = g.none;
+        for (const lot of g.elig) { if (rest <= 1e-7 || g.remaining <= 1e-7) break; if (lot.remaining <= 1e-7) continue; const q = clampQty(Math.min(rest, g.remaining, lot.remaining)); take(g, lot, q, false); rest = clampQty(rest - q); }
+        for (const lot of g.elig) { if (g.remaining <= 1e-7) break; if (lot.remaining <= 1e-7) continue; take(g, lot, clampQty(Math.min(g.remaining, lot.remaining)), true); g.allocations[g.allocations.length - 1].txSub = true; }
       }
       for (const g of grp) { const required = Number(g.x.quantity), shortage = clampQty(g.remaining); shipments.set(g.x.id, { required, shipped: clampQty(required - shortage), shortage, allocations: g.allocations, tx: true, txMiss: g.miss, txNone: g.none }); }
       continue;
