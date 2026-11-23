@@ -604,12 +604,13 @@ function renderAllocations(ledger) {
 const allocBatch = (a, day) => a.expiryDate === NO_EXPIRY ? '期初現貨' : (a.batch && a.batch !== '—' ? a.batch : makeBatch(a.product, day) || '—');
 const txBatchLab = b => b === '—' ? '沒寫批號' : batchMd(b) ? `${b.slice(4, 6)}（${batchMd(b)}）` : b;
 // 交易明細核對的資料（每個品號第一段一列）：總表需求 req、交易明細 det（客人）、寄門市 shop（門市入貨，排單日＝這天）、App 扣的批號 app、批號對不上 miss
-// adj＝調整明細表上總公司的出庫、領取（例如 KA-20 出庫 3 個）；gap＝總表 −（明細＋寄門市＋調整單）：整天的出庫跟總表核對（試吃、還沒開單、打錯…會留在這裡）
+// adj＝調整明細表上總公司的出庫、領取：寄門市的調撥（出庫）和其他出庫（例如 KA-20 3 個）都在裡面。
+// gap＝總表 −（明細＋調整單）：整天的出庫跟總表核對；那天的調整明細表還沒匯時，先用寄門市（揀貨總表）代替調整單（2026-11-23 起，之前兩個都扣、重複算）
 // full＝這天的明細到齊了（這天和隔天開單的交易明細都匯入了：很多訂單揀貨隔天才開單）；due＝還缺哪幾天開單的明細
 function txReconData(ledger, day) {
   const recs = data.txbs.filter(r => r.date === day && !r.unmatched), unm = data.txbs.filter(r => r.unmatched && r.tx === day);
   const by = new Map(), g = bc => { if (!by.has(bc)) by.set(bc, { code: bc, req: 0, det: {}, app: {}, miss: 0, none: 0, shop: 0, adj: 0 }); return by.get(bc); };
-  const mk = FEStore.get('settings', 'sys-' + day); for (const [c, q] of Object.entries((mk && mk.hqOut) || {})) g(c).adj = clampQty(Number(q) || 0);
+  const mk = FEStore.get('settings', 'sys-' + day), hasAdj = !!mk; for (const [c, q] of Object.entries((mk && mk.hqOut) || {})) g(c).adj = clampQty(Number(q) || 0);
   for (const r of recs) { const x = g(r.code); for (const [b, q] of Object.entries(r.batches)) x.det[b] = clampQty((x.det[b] || 0) + q); }
   for (const sh of data.movements) {
     if (sh.type !== 'shipment' || sh.date !== day) continue;
@@ -618,9 +619,9 @@ function txReconData(ledger, day) {
     if (L.tx) { x.miss = clampQty(x.miss + Object.values(L.txMiss || {}).reduce((t, v) => t + v, 0)); x.none = clampQty(x.none + (L.txNone || 0)); }
   }
   for (const r of data.shops) if (r.type === 'in' && String(r.id).startsWith('pt-in-') && shopFrom(r) === day) { const x = g(baseCode(r.product)); x.shop = clampQty(x.shop + r.quantity); }
-  const rows = [...by.values()].map(x => { const detQ = sumQ(Object.values(x.det), v => v); return { ...x, detQ, gap: clampQty(x.req - detQ - x.shop - x.adj) }; }).sort((a, b) => productOrder(a.code, b.code));
+  const rows = [...by.values()].map(x => { const detQ = sumQ(Object.values(x.det), v => v); return { ...x, detQ, gap: clampQty(x.req - detQ - (hasAdj ? x.adj : x.shop)) }; }).sort((a, b) => productOrder(a.code, b.code));
   const txDays = new Set(data.txbs.map(t => t.tx)), due = [day, addDays(day, 1)].filter(t => !txDays.has(t));
-  return { recs, unm, rows, full: !due.length, due };
+  return { recs, unm, rows, full: !due.length, due, hasAdj };
 }
 function renderTxRecon(ledger, day) {
   const box = $('txRecon'), info = $('txInfo'); if (!box) return;
@@ -636,11 +637,11 @@ function renderTxRecon(ledger, day) {
   const issue = x => x.miss || (R.full && x.gap);
   const rows = R.rows.map(x => {
     const ok = !x.miss && !x.gap;
-    const st = ok ? badge('一致', 'ok') : [x.miss ? `<span title="交易明細上的批號，App 庫存裡沒有或不夠；數量已照先到期先出改扣別批（庫存跟總表一致），常見原因是前一天開單的明細還沒匯入">${badge(`批號對不上 ${fmt(x.miss)}`, 'bad')}</span>` : '', x.gap ? `<span title="${esc(x.gap > 0 ? '總表的出貨比交易明細＋寄門市＋調整單多：試吃、還沒開單（等隔天的明細）、調整明細表還沒匯、總表打錯…' : '交易明細＋寄門市＋調整單比總表的出貨多：總表少記、門市入貨日期不對…')}">${badge(x.gap > 0 ? `總表多 ${fmt(x.gap)}` : `明細＋門市多 ${fmt(-x.gap)}`, R.full ? 'due' : 'other')}</span>` : ''].filter(Boolean).join(' ');
+    const st = ok ? badge('一致', 'ok') : [x.miss ? `<span title="交易明細上的批號，App 庫存裡沒有或不夠；數量已照先到期先出改扣別批（庫存跟總表一致），常見原因是前一天開單的明細還沒匯入">${badge(`批號對不上 ${fmt(x.miss)}`, 'bad')}</span>` : '', x.gap ? `<span title="${esc(x.gap > 0 ? '總表的出貨比交易明細＋調整單（總公司出庫、領取）多：試吃、還沒開單（等隔天的明細）、調整明細表還沒匯、總表打錯…' : '交易明細＋調整單比總表的出貨多：總表少記、出庫日期跟揀貨日不同…')}">${badge(x.gap > 0 ? `總表多 ${fmt(x.gap)}` : `明細＋出庫多 ${fmt(-x.gap)}`, R.full ? 'due' : 'other')}</span>` : ''].filter(Boolean).join(' ');
     return `<tr class="${issue(x) ? 'row-on' : ''}">${td(`<strong class="mono">${esc(x.code)}</strong>`)}<td class="num">${fmt(x.req)}</td><td class="num">${fmt(x.detQ)}</td><td class="num">${fmt(x.shop)}</td><td class="num">${x.adj ? fmt(x.adj) : '—'}</td><td class="num">${x.gap ? fmt(x.gap) : '—'}</td><td class="exp-cell"><div class="exp-chips">${chips(x.det, 'other') || '—'}</div></td><td class="exp-cell"><div class="exp-chips">${chips(x.app, 'future') || '—'}</div></td>${td(st)}</tr>`;
   });
   const tot = f => clampQty(R.rows.reduce((t, x) => t + f(x), 0)), bad = R.rows.filter(issue).length;
-  info.textContent = `跟上面同一天（${day}）：總表 ${fmt(tot(x => x.req))} 個＝交易明細 ${fmt(tot(x => x.detQ))} 個（${[...src.entries()].sort().map(([t, q]) => `${md(t)} 開單 ${fmt(q)}`).join('、')}）＋寄門市 ${fmt(tot(x => x.shop))} 個${tot(x => x.adj) ? `＋調整單（總公司出庫、領取）${fmt(tot(x => x.adj))} 個` : ''}${tot(x => x.gap) ? `，差 ${fmt(tot(x => x.gap))} 個` : ''}；${R.full ? '明細已到齊' : `還缺 ${R.due.map(md).join('、')} 開單的明細（很多訂單揀貨隔天才開單），差的數字先參考就好`}${bad ? `；${bad} 項要看` : '；沒有要處理的'}`;
+  info.textContent = `跟上面同一天（${day}）：總表 ${fmt(tot(x => x.req))} 個＝交易明細 ${fmt(tot(x => x.detQ))} 個（${[...src.entries()].sort().map(([t, q]) => `${md(t)} 開單 ${fmt(q)}`).join('、')}）${R.hasAdj ? `＋調整單（總公司出庫、領取，含寄門市的調撥）${fmt(tot(x => x.adj))} 個（揀貨總表寄門市 ${fmt(tot(x => x.shop))} 個）` : `＋寄門市 ${fmt(tot(x => x.shop))} 個（這天的調整明細表還沒匯，先用揀貨總表的寄門市）`}${tot(x => x.gap) ? `，差 ${fmt(tot(x => x.gap))} 個` : ''}；${R.full ? '明細已到齊' : `還缺 ${R.due.map(md).join('、')} 開單的明細（很多訂單揀貨隔天才開單），差的數字先參考就好`}${bad ? `；${bad} 項要看` : '；沒有要處理的'}`;
   box.innerHTML = table(['品號', '總表需求#', '明細#', '寄門市#', '調整單#', '差#', '明細的批號', 'App 扣的批號（明細優先，剩下的先到期先出）', '核對'], rows, '') + (unm.length ? txUnmatchedHtml(unm) : '');
 }
 function txUnmatchedHtml(unm) {
@@ -699,7 +700,7 @@ function renderDailyCheck(today, ledger) {
       const missQ = clampQty(sumQ(R.rows, x => x.miss)), gapQ = clampQty(sumQ(R.rows, x => Math.abs(x.gap))), parts = [];
       if (missQ) parts.push(flag(B(`批號對不上 ${fmt(missQ)}`, 'bad', '交易明細上的批號，App 庫存裡沒有或不夠（數量已照先到期先出改扣別批，庫存跟總表一致）：先補匯前一天的明細，還在就查總表的轉現貨、換盒'), true));
       if (!R.full) for (const t of R.due) parts.push(t >= today ? B(`等 ${md(t)} 明細`, 'other', `${md(t)} 開單的明細明天才有；很多訂單揀貨隔天才開單`) : flag(B(`缺 ${md(t)} 明細`, 'due', `${md(t)} 開單的交易明細沒匯入，這天的核對不完整`), true));
-      else if (gapQ) parts.push(flag(B(`差 ${fmt(gapQ)}`, 'due', '總表的出貨 ≠ 交易明細＋寄門市＋調整單（試吃、總表打錯、門市入貨日期不對…），到「出貨扣批明細」看是哪個品號'), true));
+      else if (gapQ) parts.push(flag(B(`差 ${fmt(gapQ)}`, 'due', '總表的出貨 ≠ 交易明細＋調整單（總公司出庫、領取；沒匯調整明細時用寄門市），到「出貨扣批明細」看是哪個品號'), true));
       if (!parts.length) parts.push(B('一致', 'ok'));
       c4 = link('allocations', d, parts.join(' '));
     }
