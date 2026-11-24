@@ -2200,8 +2200,11 @@ function renderShopAudit(sid) {
     const u = esc(getUnit(p.product));
     rows.push(`<tr class="aud-prod"><td colspan="5"><strong>${esc(p.product)}</strong>　${badge(SAUD_ST[p.g.st][0], SAUD_ST[p.g.st][1])} <span class="who">帳上 ${fmt(p.g.book)}／實盤 ${p.g.counted ? fmt(p.g.cnt) : '—'}</span></td></tr>`);
     for (const x of p.list) {
-      const d = x.count === null ? null : clampQty(x.count - x.book), exps = [...x.exps].sort(), gone = exps.length && exps[0] < sess.date;
-      const expTxt = exps.length ? exps.map(md).join('、') : x.added ? `（入貨日 ${md(x.sellFrom || batchDate(x.batch) || sess.date)}）` : '—';
+      const d = x.count === null ? null : clampQty(x.count - x.book), exps = [...x.exps].sort();
+      // 帳上沒有的批號（實盤新增）：照填的入貨日，沒填就照批號的製造日期（轉現貨日）推算可販售到；都沒有用盤點日
+      const sf0 = x.added ? ((x.sellFrom || batchDate(x.batch) || sess.date) > sess.date ? sess.date : (x.sellFrom || batchDate(x.batch) || sess.date)) : '';
+      const gone = exps.length ? exps[0] < sess.date : x.added && shopExpiryFor(p.product, sf0) < sess.date;
+      const expTxt = exps.length ? exps.map(md).join('、') : x.added ? `${md(shopExpiryFor(p.product, sf0))}（照${x.sellFrom ? '入貨日' : batchDate(x.batch) ? '批號' : '盤點日'} ${md(sf0)} 推算）` : '—';
       rows.push(`<tr>${td(`<span class="mono">${esc(x.batch || '批號不明')}</span>${x.guess ? ' ' + badge('推定', 'other') : ''}${x.added ? ' ' + badge('實盤新增', 'due') : ''}`)}${td(`<span class="mono">${esc(expTxt)}</span>${gone ? ' ' + badge('已過期', 'expired') : ''}`)}<td class="num">${fmt(x.book)} ${u}</td><td class="num">${edit ? `<input class="aud-in" type="number" inputmode="numeric" min="0" step="1" value="${x.count === null ? '' : esc(x.count)}" placeholder="未盤" data-saud="${esc(x.key)}" data-shop="${sid}" aria-label="${esc(p.product)} ${esc(x.batch || '批號不明')} 實盤">` : (x.count === null ? '—' : fmt(x.count))}</td><td class="num">${d === null ? '—' : Math.abs(d) < 1e-7 ? badge('0', 'ok') : badge((d > 0 ? '＋' : '－') + fmt(Math.abs(d)), 'bad')}</td></tr>`);
     }
   }
@@ -2224,12 +2227,22 @@ async function shopAudNew(sid) {
 }
 async function shopAudAddLine(sid) {
   const sess = shopAudSession(sid); if (!sess || sess.status === 'done' || !can(shopPerm(sid))) return;
-  const res = await modal({ title: '新增一列（帳上沒有的批號）', ok: '加入', html: `<div class="field"><label for="sal-product">產品</label><input id="sal-product" list="productNames" placeholder="輸入品號或品名" autocomplete="off"></div><div class="field"><label for="sal-batch">批號（盒子標籤上的；看不到就空白＝批號不明）</label><input id="sal-batch" placeholder="例如 CKAS9901" maxlength="30" style="text-transform:uppercase"></div><div class="field"><label for="sal-from">入貨日（可販售期的第 1 天；不知道就空白＝用批號的製造日期）</label><input id="sal-from" type="date"></div><div class="field"><label for="sal-qty">實盤數量</label><input id="sal-qty" type="number" min="0" step="1" inputmode="numeric"></div><p class="modal-note">多出來的貨套用後會記成「盤盈」。入貨日不知道時用批號的製造日期（最早可能的入貨日，可販售期比較保守）；批號也看不到就用盤點日。</p><p class="modal-error" hidden></p>`,
+  const pr = modal({ title: '新增一列（帳上沒有的批號）', ok: '加入', html: `<div class="field"><label for="sal-product">產品</label><input id="sal-product" list="productNames" placeholder="輸入品號或品名" autocomplete="off"></div><div class="field"><label for="sal-batch">批號（盒子標籤上的；看不到就空白＝批號不明）</label><input id="sal-batch" placeholder="例如 CKAS9901" maxlength="30" style="text-transform:uppercase"></div><div class="field"><label for="sal-from">入貨日（可販售期的第 1 天；不知道就空白＝用批號的製造日期）</label><input id="sal-from" type="date"></div><div class="field"><label for="sal-qty">實盤數量</label><input id="sal-qty" type="number" min="0" step="1" inputmode="numeric"></div><p id="sal-prev" class="notice" hidden></p><p class="modal-note">入貨日不知道時照批號推算（批號的製造日期＝轉現貨日，當作入貨那天，可販售期比較保守）；批號也看不到就用盤點日。套用後多出來的記成盤盈；歸零重來的記成期初。</p><p class="modal-error" hidden></p>`,
     collect: b => {
       const p = getProduct(b.querySelector('#sal-product').value), batch = cleanBatch(b.querySelector('#sal-batch').value), from = b.querySelector('#sal-from').value, qty = Number(b.querySelector('#sal-qty').value);
       if (!p) throw Error('請從清單選產品'); if (from && (!isDate(from) || from > sess.date)) throw Error('入貨日要在盤點日（含）以前'); if (!(qty >= 0) || !Number.isFinite(qty) || b.querySelector('#sal-qty').value === '') throw Error('請填實盤數量');
       return { product: p.name, batch, from, qty };
     } });
+  { // 邊填邊顯示推算的可販售到
+    const body = $('modalBody'), pv = body && body.querySelector('#sal-prev'), upd = () => {
+      const p = getProduct(body.querySelector('#sal-product').value), b = cleanBatch(body.querySelector('#sal-batch').value), f = body.querySelector('#sal-from').value;
+      if (!p) { pv.hidden = true; return; }
+      let sf = (isDate(f) && f) || batchDate(b) || sess.date; if (sf > sess.date) sf = sess.date;
+      pv.hidden = false; pv.textContent = `可販售到 ${shopExpiryFor(p.name, sf)}（照${isDate(f) ? '入貨日' : batchDate(b) ? '批號' : '盤點日'} ${sf} 算第 1 天）`;
+    };
+    if (pv) for (const id of ['sal-product', 'sal-batch', 'sal-from']) { body.querySelector('#' + id).addEventListener('input', upd); body.querySelector('#' + id).addEventListener('change', upd); }
+  }
+  const res = await pr;
   if (!res) return;
   const key = shopAudKey(res.product, res.batch), old = data.audits.find(r => r.type === 'count' && r.session === sess.id && r.key === key);
   act(() => { FEStore.save('audit', { id: `scnt-${sess.id}-${key}`, type: 'count', shop: sid, session: sess.id, date: sess.date, key, product: res.product, pool: 'stock', batch: res.batch, qty: res.qty, added: old ? !!old.added : !shopAudBook(sess).has(key), ...(res.from ? { sellFrom: res.from } : {}), ...stampNew() }); toast('已加入'); });
