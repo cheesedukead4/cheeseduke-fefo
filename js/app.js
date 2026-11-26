@@ -241,12 +241,19 @@ function sellStatus(name, expiry, today) {
 }
 // 總公司現貨可放幾天（現階段 12 天，「資料與設定」可改）：現貨有效日期＝轉現貨日（製作日期）＋這個天數；半成品照產品的保存天數（30 天）
 const stockDaysOf = (st = data) => (st.settings && st.settings.stockDays) || 12;
+// 全現貨模式的現貨效期（2026-11-26 起）：製作日算第 1 天，產品保存天數 30 天＝製作日＋29 天
+const stockModeExp = (mfg, shelf) => addDays(mfg, Math.max(0, (Number(shelf) || 30) - 1));
+// 新增現貨時的有效日期：那天已經是全現貨模式＝製作日＋29 天；之前（半成品模式）＝轉現貨日＋現貨可放天數
+const stockExpOn = (mfg, shelf, onDate = mfg) => { const sw = stockFromDate(); return sw && onDate >= sw ? stockModeExp(mfg, shelf) : addDays(mfg, stockDaysOf()); };
 // 入口網站帶入的生產轉現貨：有效日期＝當天＋現貨可放天數
 const prodExp = (r, st = data) => r.type === 'production' && r.pool === 'stock' && String(r.id).startsWith('pt-q-') ? addDays(r.manufactureDate, stockDaysOf(st)) : r.expiryDate;
+const hqOpenCut = (st = data) => (st.opening || []).reduce((m, r) => String(r.id).startsWith('aud-open-') && isDate(r.entryDate) && r.entryDate > m ? r.entryDate : m, '');
 function calculateLedger(asOf = '9999-12-31', st = data) {
   const events = [], prio = { production: 0, convert: 1, shipment: 2 };
-  for (const x of st.opening) if (x.entryDate <= asOf) events.push({ date: x.entryDate, priority: 0, seq: x.seq || 0, type: 'opening', item: x });
-  for (const x of st.movements) if (x.date <= asOf) events.push({ date: x.date, priority: x.type === 'adjust' ? adjPriority(x) : prio[x.type] ?? 2, seq: x.seq || 0, type: x.type, item: x });
+  // 總公司盤點「當作期初」（重新開始）：那天以前的紀錄不再算（同一天其他的期初也不算，避免重複）
+  const cut = hqOpenCut(st);
+  for (const x of st.opening) if (x.entryDate <= asOf && !(cut && x.entryDate <= cut && !String(x.id).startsWith('aud-open-'))) events.push({ date: x.entryDate, priority: 0, seq: x.seq || 0, type: 'opening', item: x });
+  for (const x of st.movements) if (x.date <= asOf && !(cut && x.date < cut)) events.push({ date: x.date, priority: x.type === 'adjust' ? adjPriority(x) : prio[x.type] ?? 2, seq: x.seq || 0, type: x.type, item: x });
   events.sort((a, b) => cmp(a.date, b.date) || a.priority - b.priority || a.seq - b.seq || cmp(String(a.item.id), String(b.item.id)));
   const lots = [], shipments = new Map(), converts = new Map(), adjusts = new Map(), byProduct = new Map(), packPool = new Map();
   // 總公司交易明細的批號：排單日＋品號第一段 → { 批號: 數量 }（同一天、同一個品號第一段的出貨共用，例如 CK-14 和 CK-14|YB-86，照出貨順序扣）
@@ -259,15 +266,16 @@ function calculateLedger(asOf = '9999-12-31', st = data) {
   const noExpFirst = (a, b) => (a.expiryDate === NO_EXPIRY ? 0 : 1) - (b.expiryDate === NO_EXPIRY ? 0 : 1); // 期初現貨沒有效期資料，當最舊的先出
   const tie = (a, b) => cmp(a.expiryDate, b.expiryDate) || cmp(a.manufactureDate, b.manufactureDate) || cmp(a.entryDate, b.entryDate) || a.seq - b.seq || cmp(a.id, b.id);
   // 改用全現貨模式的第一天（2026-11-26 起）：那天一開始，還沒過期的半成品不管製作日期，全部一起轉成現貨——
-  // 轉現貨那天算第一天：批號、製作日期用那天；有效日期＝那天＋產品的保存天數（30 天，跟全現貨模式的當天生產一樣；記下原本的製作／有效日期）
+  // 批號用轉現貨日（那天）；製作日期保留原本的，有效日期＝原本的製作日＋29 天（保存天數 30 天、製作日算第 1 天；記下原本的半成品有效日期）
   const SW = stockFromDate(); let swDone = !SW || SW > asOf;
   const shelfOf = name => { const p = (st.products || []).find(q => q.name === name); return Number(p && p.shelfDays) || Number(st.settings && st.settings.defaultShelf) || 30; };
   const switchAll = d => {
     swDone = true;
     for (const lot of [...lots]) {
-      if (lot.pool !== 'semi' || lot.remaining <= 1e-7 || lot.expiryDate < d || lot.entryDate > d) continue;
+      if (lot.pool !== 'semi' || lot.remaining <= 1e-7 || lot.entryDate > d || !isDate(lot.manufactureDate)) continue;
+      const ex = stockModeExp(lot.manufactureDate, shelfOf(lot.product)); if (ex < d) continue;
       const q = lot.remaining; lot.remaining = 0; lot.used = clampQty(lot.used + q); lot.converted = clampQty(lot.converted + q);
-      addLot({ id: `sw-${d}#${lot.id}`, source: 'convert', pool: 'stock', product: lot.product, batch: makeBatch(lot.product, d) || '—', manufactureDate: d, expiryDate: addDays(d, shelfOf(lot.product)), fromMfg: lot.manufactureDate, fromExp: lot.expiryDate, entryDate: d, quantity: q, used: 0, shipped: 0, converted: 0, remaining: q, seq: 0, unit: lot.unit, fromLot: lot.id, switchAll: true });
+      addLot({ id: `sw-${d}#${lot.id}`, source: 'convert', pool: 'stock', product: lot.product, batch: makeBatch(lot.product, d) || '—', manufactureDate: lot.manufactureDate, expiryDate: ex, fromMfg: lot.manufactureDate, fromExp: lot.expiryDate, entryDate: d, quantity: q, used: 0, shipped: 0, converted: 0, remaining: q, seq: 0, unit: lot.unit, fromLot: lot.id, switchAll: true });
     }
   };
   for (const e of events) {
@@ -583,7 +591,7 @@ function renderBatches(groups, today) {
   const rows = searchable(base, $('batchFilter').value, ['product', 'expText']).sort((a, b) => (a.total > 0 ? 0 : 1) - (b.total > 0 ? 0 : 1) || productOrder(a.product, b.product));
   const nExp = list.reduce((s, p) => s + p.exps.length, 0), modeName = (MODES[batchMode] || [''])[0];
   document.querySelectorAll('#batchSeg [data-bmode]').forEach(b => b.classList.toggle('on', b.dataset.bmode === batchMode));
-  $('batchCount').textContent = batchMode === 'all' ? `目前有庫存的產品 ${list.filter(p => p.total > 0).length} 項、共 ${nExp} 個批次；現貨有效日期＝轉現貨日＋${stockDaysOf()} 天，半成品＝製作日期＋保存天數；依品號 ${SORT_PREFIXES.join('、')} 排列` : `${modeName}：${base.length} 項產品、${nExp} 個批次，共 ${fmt(clampQty(base.reduce((s, p) => s + p.match, 0)))} 個`;
+  $('batchCount').textContent = batchMode === 'all' ? `目前有庫存的產品 ${list.filter(p => p.total > 0).length} 項、共 ${nExp} 個批次；${stockFromDate() && stockFromDate() <= TODAY() ? `全現貨模式（${md(stockFromDate())} 起）：現貨有效日期＝製作日＋29 天` : `現貨有效日期＝轉現貨日＋${stockDaysOf()} 天`}，半成品＝製作日期＋保存天數；依品號 ${SORT_PREFIXES.join('、')} 排列` : `${modeName}：${base.length} 項產品、${nExp} 個批次，共 ${fmt(clampQty(base.reduce((s, p) => s + p.match, 0)))} 個`;
   const cell = (list, u) => `<td class="exp-cell">${list.length ? `<div class="exp-chips">${list.map(e => expChip(e, u, today)).join('')}</div>` : '<span class="who">—</span>'}</td>`;
   $('batchTable').innerHTML = table(['產品', `現貨（批號・有效日期；可放 ${stockDaysOf()} 天）`, '半成品（製作日期・有效日期）', '現貨#', '半成品#', '剩餘庫存#'], rows.map(p => `<tr>${td(`<strong>${esc(p.product)}</strong>`)}${cell(p.exps.filter(e => e.kind === 'stock'), p.unit)}${cell(p.exps.filter(e => e.kind === 'semi'), p.unit)}<td class="num">${p.stock ? fmt(p.stock) : '—'}</td><td class="num">${p.semi ? fmt(p.semi) : '—'}</td><td class="num">${fmt(p.total)} ${esc(p.unit)}</td></tr>`), batchMode === 'all' ? '尚無批次庫存紀錄' : `目前沒有${modeName}的庫存`);
 }
@@ -1324,7 +1332,7 @@ function adjFormSync(fillExpiry) {
   $('adMfgWrap').hidden = $('adExpWrap').hidden = dir !== 'add'; $('adFromWrap').hidden = dir !== 'sub';
   if (dir === 'add') {
     if (!$('adMfg').value && isDate(date)) $('adMfg').value = date;
-    if (fillExpiry && p && isDate($('adMfg').value)) $('adExp').value = addDays($('adMfg').value, $('adPool').value === 'stock' ? stockDaysOf() : p.shelfDays);
+    if (fillExpiry && p && isDate($('adMfg').value)) $('adExp').value = $('adPool').value === 'stock' ? stockExpOn($('adMfg').value, p.shelfDays, isDate(date) ? date : $('adMfg').value) : addDays($('adMfg').value, p.shelfDays);
   }
   if (dir === 'sub') {
     const cur = $('adFrom').value, lots = p && isDate(date) ? lotsLeftOf(p.name, date, pool) : [];
@@ -1405,7 +1413,7 @@ async function deleteAdjust(id) {
 function sanitizeAudit(r) {
   if (!r || typeof r !== 'object' || !r.id || !isDate(r.date)) return null;
   const base = { id: String(r.id), date: r.date, by: clean(r.by), at: r.at || '', ...(r.editBy ? { editBy: clean(r.editBy), editAt: r.editAt || '' } : {}), ...(SHOPS.some(x => x.id === r.shop) ? { shop: r.shop } : {}) };
-  if (r.type === 'session') return { ...base, type: 'session', seq: Number(r.seq) || 0, phase: r.phase === 'start' ? 'start' : 'end', status: r.status === 'done' ? 'done' : 'open', note: clean(r.note), appliedAt: r.appliedAt || '', appliedBy: clean(r.appliedBy), ...(r.reset ? { reset: true } : {}) };
+  if (r.type === 'session') return { ...base, type: 'session', seq: Number(r.seq) || 0, phase: r.phase === 'start' ? 'start' : 'end', status: r.status === 'done' ? 'done' : 'open', note: clean(r.note), appliedAt: r.appliedAt || '', appliedBy: clean(r.appliedBy), ...(r.reset ? { reset: true } : {}), ...(r.opening ? { opening: true } : {}) };
   if (r.type === 'count') {
     const q = Number(r.qty), product = clean(r.product), key = String(r.key || '');
     if (!r.session || !product || !key || !(q >= 0) || q >= 1e7) return null;
@@ -1459,7 +1467,7 @@ function renderAudit() {
   // 正在輸入實盤時先不重畫表格，離開輸入框再更新
   if ($('auditTable').contains(document.activeElement) && document.activeElement.matches('[data-aud]')) { auditDirty = true; return; }
   auditDirty = false;
-  const { prods } = auditSheet(sess), edit = editP && sess.status !== 'done';
+  const { prods } = auditSheet(sess), edit = editP && sess.status !== 'done' && !sess.opening;
   document.querySelectorAll('#auditSeg [data-amode]').forEach(b => b.classList.toggle('on', b.dataset.amode === auditMode));
   const all = prods.flatMap(p => [p.gs, p.gm].filter(Boolean)), cnt = st => all.filter(g => g.st === st).length;
   const dist = prods.flatMap(p => [['stock', p.gs, p.stock], ['semi', p.gm, p.semi]].filter(([, g]) => g && g.st === 'dist').map(([pool, g, list]) => ({ product: p.product, pool, list })));
@@ -1467,7 +1475,9 @@ function renderAudit() {
   const corr = data.movements.filter(r => String(r.id).startsWith(`aud-${sess.id}-`));
   $('auditTitle').textContent = `盤點表：${sess.date}（${sess.phase === 'start' ? '當天開始前' : '當天結束'}）`;
   $('auditInfo').textContent = `${sess.status === 'done' ? '已完成' : '盤點中'}｜帳上＝${sess.phase === 'start' ? `${addDays(sess.date, -1)} 結束` : `${sess.date} 結束`}的批次庫存｜一致 ${cnt('ok')} 組、分布不同 ${cnt('dist')} 組、總數不同 ${cnt('total')} 組、盤點中 ${cnt('partial')} 組、未盤 ${cnt('todo')} 組（每個品項的現貨、半成品各算一組）`;
-  $('auditActions').innerHTML = [
+  const openN = data.opening.filter(r => String(r.id).startsWith(`aud-open-${sess.id}-`)).length;
+  $('auditActions').innerHTML = sess.opening ? [`<div class="notice"><strong>這張盤點單已經當作期初</strong>：${openN} 列記成總公司的期初庫存（入帳日 ${esc(sess.phase === 'start' ? sess.date : addDays(sess.date, 1))}${sess.appliedBy ? '，' + esc(sess.appliedBy) : ''}），在「期初庫存建檔」看得到。${editP ? ' <button type="button" class="btn small danger" data-action="audit-open-undo">取消當作期初</button>' : ''}</div>`, editP ? `<div class="form-actions"><button type="button" class="btn small danger" data-action="audit-delete">刪除盤點單</button></div>` : ''].join('') : [
+    editP && prods.some(p => (p.gs && p.gs.counted) || (p.gm && p.gm.counted)) ? `<div class="notice"><strong>當作期初（重新開始）</strong>：不跟帳上比，實盤的每一列直接記成總公司的期初庫存（入帳日＝${esc(sess.phase === 'start' ? sess.date : addDays(sess.date, 1))}），起算日也改成那天。適合清空舊資料、重新開始時用。 <button type="button" class="btn small danger" data-action="audit-opening">當作期初</button></div>` : '',
     dist.length ? `<div class="notice warning"><strong>分布不同（總數一樣）${dist.length} 組</strong>：${esc(dist.map(d => `${productCodeOf(d.product)} ${d.pool === 'stock' ? '現貨' : '半成品'}`).join('、'))}。按「批次校正」會讓帳上的批號／效期照實盤調整（舊的減、對的加，總數不變，跟總表一致）。${edit ? ' <button type="button" class="btn small primary" data-action="audit-apply">批次校正</button>' : ''}</div>` : '',
     totals.length ? `<div class="notice danger"><strong>總數不同 ${totals.length} 組，請到總表（入口網站）修正</strong>，下次同步會以手動數字或隔夜差異帶進來；App 不另外調整，避免扣兩次：${esc(totals.map(t => `${t.product} ${t.kind} 帳上 ${fmt(t.book)}／實盤 ${fmt(t.cnt)}（${t.cnt > t.book ? '多' : '少'} ${fmt(Math.abs(clampQty(t.cnt - t.book)))}）`).join('；'))}</div>` : '',
     corr.length ? `<div class="notice">這張盤點單做過批次校正 ${corr.length} 筆增減（${esc(sess.appliedAt ? new Date(sess.appliedAt).toLocaleString('zh-TW') : '')}${sess.appliedBy ? '，' + esc(sess.appliedBy) : ''}），在「半成品／現貨增減」頁看得到。${editP ? ' <button type="button" class="btn small danger" data-action="audit-unapply">取消這張的批次校正</button>' : ''}</div>` : '',
@@ -1480,14 +1490,14 @@ function renderAudit() {
     rows.push(`<tr class="aud-prod"><td colspan="6"><strong>${esc(p.product)}</strong>　${p.gs ? '現貨 ' + gb(p.gs) : ''}${p.gs && p.gm ? '　' : ''}${p.gm ? '半成品 ' + gb(p.gm) : ''}</td></tr>`);
     for (const x of [...p.stock, ...p.semi]) {
       const d = x.count === null ? null : clampQty(x.count - x.book), gone = x.exp !== NO_EXPIRY && x.exp < sess.date;
-      rows.push(`<tr>${td(x.pool === 'stock' ? badge('現貨', 'future') : badge('半成品', 'other'))}${td(`<span class="mono">${esc(x.pool === 'stock' ? x.batch : '製 ' + x.mfg)}</span>${x.added ? ' ' + badge('實盤新增', 'due') : ''}`)}${td(`<span class="mono">${esc(expShow(x.exp))}</span>${gone ? ' ' + badge('已過期', 'expired') : ''}`)}<td class="num">${fmt(x.book)} ${u}</td><td class="num">${edit ? `<input class="aud-in" type="number" inputmode="numeric" min="0" step="1" value="${x.count === null ? '' : esc(x.count)}" placeholder="未盤" data-aud="${esc(x.key)}" aria-label="${esc(p.product)} ${esc(x.batch || x.mfg)} 實盤">` : (x.count === null ? '—' : fmt(x.count))}</td><td class="num">${d === null ? '—' : Math.abs(d) < 1e-7 ? badge('0', 'ok') : badge((d > 0 ? '＋' : '－') + fmt(Math.abs(d)), 'bad')}</td></tr>`);
+      rows.push(`<tr>${td(x.pool === 'stock' ? badge('現貨', 'future') : badge('半成品', 'other'))}${td(`<span class="mono">${esc(x.pool === 'stock' ? x.batch : '製 ' + x.mfg)}</span>${x.pool === 'stock' && x.mfg && x.batch !== '期初現貨' ? ` <span class="who">製 ${esc(md(x.mfg))}</span>` : ''}${x.added ? ' ' + badge('實盤新增', 'due') : ''}`)}${td(`<span class="mono">${esc(expShow(x.exp))}</span>${gone ? ' ' + badge('已過期', 'expired') : ''}`)}<td class="num">${fmt(x.book)} ${u}</td><td class="num">${edit ? `<input class="aud-in" type="number" inputmode="numeric" min="0" step="1" value="${x.count === null ? '' : esc(x.count)}" placeholder="未盤" data-aud="${esc(x.key)}" aria-label="${esc(p.product)} ${esc(x.batch || x.mfg)} 實盤">` : (x.count === null ? '—' : fmt(x.count))}</td><td class="num">${d === null ? '—' : Math.abs(d) < 1e-7 ? badge('0', 'ok') : badge((d > 0 ? '＋' : '－') + fmt(Math.abs(d)), 'bad')}</td></tr>`);
     }
   }
   $('auditTable').innerHTML = table(['類別', '批號／製作日期', '有效日期', '帳上#', '實盤#', '差異#'], rows, auditMode === 'all' ? '這個盤點時間點沒有庫存' : '沒有符合的品項');
 }
 // 存一列實盤（空白＝刪掉，回到未盤）
 function auditSave(el) {
-  const sess = auditSession(); if (!sess || sess.status === 'done' || !can('produce')) return;
+  const sess = auditSession(); if (!sess || sess.status === 'done' || sess.opening || !can('produce')) return;
   const key = el.dataset.aud, line = auditSheet(sess).prods.flatMap(p => [...p.stock, ...p.semi]).find(x => x.key === key); if (!line) return;
   const v = el.value.trim(), id = `cnt-${sess.id}-${key}`;
   if (v === '') { if (line.rec) act(() => FEStore.remove('audit', line.rec.id)); return; }
@@ -1501,17 +1511,51 @@ async function auditNew() {
   const id = 'aud' + uid().replace(/[^A-Za-z0-9]/g, '').slice(-10);
   act(() => { FEStore.save('audit', { id, type: 'session', seq: nextSeq(), date: res.date, phase: res.phase, status: 'open', note: '', ...stampNew() }); auditSel = id; toast(`已建立 ${res.date} 的盤點單，開始填實盤數量`); });
 }
+// 新增一列：填產品、製作日期、數量就好——批號空白＝自動（全現貨模式：切換日以前做的用切換日〔轉現貨日〕，之後做的用製作日），
+// 有效日期空白＝自動（現貨：製作日＋29 天；半成品：製作日＋保存天數）
+const auditAutoBatch = (product, mfg) => { const sw = stockFromDate(); return makeBatch(product, sw && mfg < sw ? sw : mfg) || ''; };
+const auditAutoExp = (product, pool, mfg) => { const pr = getProduct(product), sh = pr ? pr.shelfDays : 30; return pool === 'stock' ? stockModeExp(mfg, sh) : addDays(mfg, Number(sh) || 30); };
 async function auditAddLine() {
-  const sess = auditSession(); if (!sess || sess.status === 'done' || !can('produce')) return;
-  const res = await modal({ title: '新增一列（帳上沒有的批號）', ok: '加入', html: `<div class="field"><label for="al-product">產品</label><input id="al-product" list="productNames" placeholder="輸入品號或品名" autocomplete="off"></div><div class="field"><label for="al-pool">類別</label><select id="al-pool"><option value="stock">現貨（填批號）</option><option value="semi">半成品（填製作日期）</option></select></div><div class="field"><label for="al-batch">批號（現貨）</label><input id="al-batch" placeholder="例如 CKAS7H01" maxlength="30" style="text-transform:uppercase"></div><div class="field"><label for="al-mfg">製作日期（半成品）</label><input id="al-mfg" type="date"></div><div class="field"><label for="al-exp">有效日期</label><input id="al-exp" type="date"></div><div class="field"><label for="al-qty">實盤數量</label><input id="al-qty" type="number" min="0" step="1" inputmode="numeric"></div><p class="modal-error" hidden></p>`,
+  const sess = auditSession(); if (!sess || sess.status === 'done' || sess.opening || !can('produce')) return;
+  const pr = modal({ title: '新增一列（帳上沒有的批號）', ok: '加入', html: `<div class="field"><label for="al-product">產品</label><input id="al-product" list="productNames" placeholder="輸入品號或品名" autocomplete="off"></div><div class="field"><label for="al-pool">類別</label><select id="al-pool"><option value="stock">現貨</option><option value="semi">半成品</option></select></div><div class="field"><label for="al-mfg">製作日期（蛋糕實際做的那天）</label><input id="al-mfg" type="date"></div><div class="field"><label for="al-batch">批號（標籤上的；空白＝自動）</label><input id="al-batch" placeholder="空白自動帶" maxlength="30" style="text-transform:uppercase"></div><div class="field"><label for="al-exp">有效日期（空白＝自動）</label><input id="al-exp" type="date"></div><div class="field"><label for="al-qty">實盤數量</label><input id="al-qty" type="number" min="0" step="1" inputmode="numeric"></div><p id="al-prev" class="notice" hidden></p><p class="modal-note">現貨的有效日期＝製作日＋29 天（保存 30 天、製作日算第 1 天）；批號在全現貨模式切換日以前做的用切換日（轉現貨日），之後做的用製作日。同一個批號可以有好幾列不同的製作日期。</p><p class="modal-error" hidden></p>`,
     collect: b => {
-      const p = getProduct(b.querySelector('#al-product').value), pool = b.querySelector('#al-pool').value, batch = cleanBatch(b.querySelector('#al-batch').value), mfg = b.querySelector('#al-mfg').value, exp = b.querySelector('#al-exp').value, qty = Number(b.querySelector('#al-qty').value);
-      if (!p) throw Error('請從清單選產品'); if (pool === 'stock' && !batch) throw Error('現貨要填批號'); if (pool === 'semi' && !isDate(mfg)) throw Error('半成品要填製作日期'); if (!isDate(exp)) throw Error('請填有效日期'); if (!(qty >= 0) || !Number.isFinite(qty)) throw Error('請填實盤數量');
-      return { product: p.name, pool, batch: pool === 'stock' ? batch : '', mfg: pool === 'stock' ? (isDate(mfg) ? mfg : addDays(exp, -stockDaysOf())) : mfg, exp, qty };
+      const p = getProduct(b.querySelector('#al-product').value), pool = b.querySelector('#al-pool').value, mfg = b.querySelector('#al-mfg').value, qty = Number(b.querySelector('#al-qty').value);
+      if (!p) throw Error('請從清單選產品'); if (!isDate(mfg)) throw Error('請填製作日期'); if (!(qty >= 0) || !Number.isFinite(qty) || b.querySelector('#al-qty').value === '') throw Error('請填實盤數量');
+      const exp = b.querySelector('#al-exp').value || auditAutoExp(p.name, pool, mfg), batch = pool === 'stock' ? (cleanBatch(b.querySelector('#al-batch').value) || auditAutoBatch(p.name, mfg)) : '';
+      if (!isDate(exp)) throw Error('有效日期格式不對');
+      return { product: p.name, pool, batch, mfg, exp, qty };
     } });
-  if (!res) return;
+  { const body = $('modalBody'), pv = body && body.querySelector('#al-prev'), upd = () => {
+      const p = getProduct(body.querySelector('#al-product').value), pool = body.querySelector('#al-pool').value, mfg = body.querySelector('#al-mfg').value;
+      if (!p || !isDate(mfg)) { pv.hidden = true; return; }
+      const exp = body.querySelector('#al-exp').value || auditAutoExp(p.name, pool, mfg), batch = pool === 'stock' ? (cleanBatch(body.querySelector('#al-batch').value) || auditAutoBatch(p.name, mfg)) : '';
+      pv.hidden = false; pv.textContent = `${pool === 'stock' ? `批號 ${batch}、` : '半成品、'}製作日期 ${mfg}、有效日期 ${exp}`;
+    };
+    if (pv) for (const id of ['al-product', 'al-pool', 'al-mfg', 'al-batch', 'al-exp']) { body.querySelector('#' + id).addEventListener('input', upd); body.querySelector('#' + id).addEventListener('change', upd); } }
+  const res = await pr; if (!res) return;
   const key = auditKey(res.product, res.pool, res.batch, res.mfg, res.exp);
   act(() => { FEStore.save('audit', { id: `cnt-${sess.id}-${key}`, type: 'count', session: sess.id, date: sess.date, key, product: res.product, pool: res.pool, batch: res.batch, mfg: res.mfg, exp: res.exp, qty: res.qty, added: true, ...stampNew() }); toast('已加入'); });
+}
+// 當作期初（重新開始，2026-11-26 起）：實盤的每一列記成總公司的期初庫存（入帳日＝盤點隔天；當天開始前的盤點＝當天），
+// 起算日改成那天（書籤不會再帶入更早的日子），總表那天的期初現貨也不再帶入（避免重複）。要先清空那天以前的舊紀錄
+async function auditOpening() {
+  const sess = auditSession(); if (!sess || !can('produce')) return;
+  if (sess.opening) return;
+  const S = sess.phase === 'start' ? sess.date : addDays(sess.date, 1);
+  const old = data.opening.filter(r => !String(r.id).startsWith('aud-open-') && r.entryDate <= S).length + data.movements.filter(r => r.date < S).length;
+  const lines = auditSheet(sess).prods.flatMap(p => [...p.stock, ...p.semi]).filter(x => x.count !== null && x.count > 1e-7);
+  if (!lines.length) { toast('還沒有填任何實盤數量', true); return; }
+  const who = myName(), at = nowIso(); let n = 0;
+  const recs = lines.map(x => ({ id: `aud-open-${sess.id}-${++n}`, type: 'opening', product: x.product, batch: x.pool === 'stock' ? (x.batch && x.batch !== '期初現貨' ? x.batch : auditAutoBatch(x.product, x.mfg || S)) : '—', manufactureDate: isDate(x.mfg) ? x.mfg : S, expiryDate: isDate(x.exp) ? x.exp : auditAutoExp(x.product, x.pool, isDate(x.mfg) ? x.mfg : S), entryDate: S, quantity: x.count, ...(x.pool === 'stock' ? { pool: 'stock' } : {}), note: `期初（${sess.date} 總公司盤點）`, seq: nextSeq(), by: who, at }));
+  const q = sumQ(recs, r => r.quantity);
+  if (!await modal({ title: '當作期初（重新開始）', ok: '當作期初', danger: true, html: `<p>這張盤點單的實盤記成總公司的<strong>期初庫存</strong>：${recs.length} 列、共 ${fmt(q)} 個，入帳日 <strong>${esc(S)}</strong>。</p><p>同時把入口網站同步的<strong>起算日改成 ${esc(S)}</strong>（書籤不會再帶入更早的日子），總表那天的「期初現貨」也不再帶入，避免重複。</p>${old ? `<p>${esc(S)} 以前的紀錄和那天的其他期初共 ${old} 筆<strong>不再算進庫存</strong>（資料留著不刪）。</p>` : ''}<p class="modal-note">之後可以按「取消當作期初」還原（起算日要另外改回）。</p>` })) return;
+  act(() => { FEStore.saveMany('opening', recs); FEStore.save('settings', { ...portalMeta(), id: 'portal', syncFrom: S }); FEStore.save('audit', { ...sess, opening: true, appliedAt: Date.now(), appliedBy: who, ...stampEdit() }); toast(`已當作期初：${recs.length} 列、${fmt(q)} 個，起算日 ${S}`, false, 8000); });
+}
+async function auditOpeningUndo() {
+  const sess = auditSession(); if (!sess || !can('produce') || !sess.opening) return;
+  const ids = data.opening.filter(r => String(r.id).startsWith(`aud-open-${sess.id}-`)).map(r => r.id);
+  if (!await modal({ title: '取消當作期初？', ok: '取消當作期初', danger: true, html: `<p>會刪掉這張盤點單記的 ${ids.length} 筆期初庫存。起算日不會自動改回，需要的話到「入口網站同步」的同步設定改。</p>` })) return;
+  act(() => { if (ids.length) FEStore.removeMany('opening', ids); const { opening: _o, ...rest } = sess; FEStore.save('audit', { ...rest, appliedAt: '', appliedBy: '', ...stampEdit() }); toast('已取消當作期初'); });
 }
 // 批次校正：「分布不同（總數一樣）」的組，舊的減、對的加（當天最後；當天開始前的盤點記在前一天最後）
 async function auditApply() {
@@ -1524,7 +1568,7 @@ async function auditApply() {
       const d = clampQty(x.count - x.book); if (Math.abs(d) < 1e-7) continue;
       const base = { id: `aud-${sess.id}-${++n}`, type: 'adjust', seq: nextSeq(), date, product: p.product, quantity: Math.abs(d), note: `盤點批次校正（${sess.date}）`, phase: 'close', ...(pool === 'stock' ? { pool: 'stock' } : {}), by: who, at };
       recs.push(d < 0 ? { ...base, dir: 'sub', fromMfg: pool === 'stock' ? '' : x.mfg, fromExp: x.exp, ...(pool === 'stock' && x.batch !== '期初現貨' ? { fromBatch: x.batch } : {}) }
-        : { ...base, dir: 'add', manufactureDate: x.mfg || date, expiryDate: x.exp === NO_EXPIRY ? addDays(date, stockDaysOf()) : x.exp, ...(pool === 'stock' && x.batch !== '期初現貨' ? { batch: x.batch } : {}) });
+        : { ...base, dir: 'add', manufactureDate: x.mfg || date, expiryDate: x.exp === NO_EXPIRY ? stockExpOn(date, (getProduct(p.product) || {}).shelfDays, date) : x.exp, ...(pool === 'stock' && x.batch !== '期初現貨' ? { batch: x.batch } : {}) });
     }
   }
   if (!recs.length) return;
@@ -1540,6 +1584,7 @@ async function auditUnapply() {
 function auditStatus(status) { const sess = auditSession(); if (!sess || !can('produce')) return; act(() => { FEStore.save('audit', { ...sess, status, ...stampEdit() }); toast(status === 'done' ? '盤點單已完成（不能再改實盤；要改請按「重新開啟」）' : '已重新開啟盤點單'); }); }
 async function auditDelete() {
   const sess = auditSession(); if (!sess || !can('produce')) return;
+  if (sess.opening) { toast('這張盤點單已經當作期初，請先按「取消當作期初」再刪除', true, 6000); return; }
   const cnts = data.audits.filter(r => r.type === 'count' && r.session === sess.id).map(r => r.id), corr = data.movements.filter(r => String(r.id).startsWith(`aud-${sess.id}-`)).length;
   if (!await modal({ title: '刪除這張盤點單？', ok: '刪除', danger: true, html: `<p>${esc(sess.date)}（${sess.phase === 'start' ? '當天開始前' : '當天結束'}）的盤點單與 ${cnts.length} 筆實盤數量會刪除，不能復原。</p>${corr ? `<p class="modal-note">這張做過的 ${corr} 筆批次校正不會刪掉；要還原請先按「取消這張的批次校正」。</p>` : ''}` })) return;
   act(() => { FEStore.removeMany('audit', [sess.id, ...cnts]); auditSel = ''; toast('已刪除盤點單'); });
@@ -1547,7 +1592,7 @@ async function auditDelete() {
 function auditCsv() {
   const sess = auditSession(); if (!sess) return;
   const { prods } = auditSheet(sess), rows = [];
-  for (const p of prods) for (const x of [...p.stock, ...p.semi]) { const g = x.pool === 'stock' ? p.gs : p.gm; rows.push([p.product, getUnit(p.product), x.pool === 'stock' ? '現貨' : '半成品', x.pool === 'stock' ? x.batch : '', x.pool === 'stock' ? '' : x.mfg, expShow(x.exp), x.book, x.count === null ? '' : x.count, x.count === null ? '' : clampQty(x.count - x.book), g ? AUDIT_ST[g.st][0] : '', x.added ? '實盤新增' : '', x.rec ? (x.rec.editBy || x.rec.by) : '']); }
+  for (const p of prods) for (const x of [...p.stock, ...p.semi]) { const g = x.pool === 'stock' ? p.gs : p.gm; rows.push([p.product, getUnit(p.product), x.pool === 'stock' ? '現貨' : '半成品', x.pool === 'stock' ? x.batch : '', x.batch === '期初現貨' ? '' : (x.mfg || ''), expShow(x.exp), x.book, x.count === null ? '' : x.count, x.count === null ? '' : clampQty(x.count - x.book), g ? AUDIT_ST[g.st][0] : '', x.added ? '實盤新增' : '', x.rec ? (x.rec.editBy || x.rec.by) : '']); }
   const content = '\ufeff' + [['產品', '單位', '類別', '批號', '製作日期', '有效日期', '帳上', '實盤', '差異', '這組狀態', '備註', '盤點人'], ...rows].map(r => r.map(csvEscape).join(',')).join('\r\n');
   downloadFile(`庫存盤點_${sess.date}_${sess.phase === 'start' ? '開始前' : '結束'}.csv`, content, 'text/csv;charset=utf-8', '盤點表 CSV 已下載');
 }
@@ -2727,7 +2772,7 @@ function applyPortalPending() {
     const saves = [], removes = [], who = myName(), at = nowIso(), sum = { pN: 0, pQ: 0, sN: 0, sQ: 0, qN: 0, qQ: 0, cN: 0, cQ: 0, jN: 0, gN: 0 };
     // 期初現貨：起算日那天總表的「期初現貨」，每個品號一筆期初庫存（批號「現貨」、沒有效期）；書籤有讀到起算日才更新
     const openSaves = [], openRemoves = [], stockOpen = { n: 0, q: 0, set: false };
-    if (c.hasStock && okP && from && c.days[from]) {
+    if (c.hasStock && okP && from && c.days[from] && !data.opening.some(r => String(r.id).startsWith('aud-open-') && r.entryDate === from)) {
       stockOpen.set = true;
       const oldOpen = new Map(data.opening.filter(r => r.id.startsWith('pt-o-')).map(r => [r.id, r])), wantOpen = new Set();
       for (const r of c.days[from]) {
@@ -2751,7 +2796,7 @@ function applyPortalPending() {
             if (!signed) return;
             const p = productFor(r.code, r.name), id = `pt-j${suffix}-${ds}-${r.code}`, old = existing.get(id), dir = signed > 0 ? 'add' : 'sub', q = clampQty(Math.abs(signed)), mfg = phase === 'open' ? addDays(ds, -1) : ds;
             want.add(id); sum.jN++; if (phase === 'open') sum.gN++;
-            const body = { type: 'adjust', dir, date: ds, product: p.name, quantity: q, note: `入口網站：${label}`, phase, ...(pool === 'stock' ? { pool: 'stock' } : {}), ...(dir === 'add' ? { batch: '—', manufactureDate: mfg, expiryDate: addDays(mfg, pool === 'stock' ? stockDaysOf() : p.shelfDays) } : { fromMfg: '', fromExp: '' }) };
+            const body = { type: 'adjust', dir, date: ds, product: p.name, quantity: q, note: `入口網站：${label}`, phase, ...(pool === 'stock' ? { pool: 'stock' } : {}), ...(dir === 'add' ? { batch: '—', manufactureDate: mfg, expiryDate: pool === 'stock' ? stockExpOn(mfg, p.shelfDays, ds) : addDays(mfg, p.shelfDays) } : { fromMfg: '', fromExp: '' }) };
             const rec = old ? { ...old, ...body } : { id, seq: nextSeq(), ...body, by: who, at };
             if (!old || old.quantity !== rec.quantity || old.dir !== rec.dir || old.product !== rec.product || (old.pool || '') !== (rec.pool || '') || old.note !== rec.note || old.phase !== rec.phase || old.manufactureDate !== rec.manufactureDate || old.expiryDate !== rec.expiryDate) saves.push(rec);
           };
@@ -2774,8 +2819,8 @@ function applyPortalPending() {
           if (okP && q > 0) {
             const p = productFor(r.code, r.name), id = `pt-p-${ds}-${r.code}`, old = existing.get(id);
             want.add(id); sum.pN++; sum.pQ += q;
-            const rec = old ? { ...old, product: p.name, quantity: q, batch: batchFor(p.name, ds), note: '入口網站：當天生產（全現貨模式）' } : { id, type: 'production', seq: nextSeq(), date: ds, product: p.name, batch: batchFor(p.name, ds), manufactureDate: ds, expiryDate: addDays(ds, p.shelfDays), quantity: q, note: '入口網站：當天生產（全現貨模式）', by: who, at };
-            if (!old || old.quantity !== rec.quantity || old.product !== rec.product || old.note !== rec.note || old.batch !== rec.batch) saves.push(rec);
+            const exS = stockModeExp(ds, p.shelfDays), rec = old ? { ...old, product: p.name, quantity: q, batch: batchFor(p.name, ds), expiryDate: old.editBy ? old.expiryDate : exS, note: '入口網站：當天生產（全現貨模式）' } : { id, type: 'production', seq: nextSeq(), date: ds, product: p.name, batch: batchFor(p.name, ds), manufactureDate: ds, expiryDate: exS, quantity: q, note: '入口網站：當天生產（全現貨模式）', by: who, at };
+            if (!old || old.quantity !== rec.quantity || old.product !== rec.product || old.note !== rec.note || old.batch !== rec.batch || old.expiryDate !== rec.expiryDate) saves.push(rec);
           }
           if (okS && r.outQ > 0) {
             const p = productFor(r.code, r.name), id = `pt-s-${ds}-${r.code}`, old = existing.get(id);
@@ -2961,6 +3006,8 @@ async function handleAction(el) {
   if (a === 'store-out') return syncStoreOut(storeOutDates());
   if (a === 'tx-import' || a === 'sys-import') return openSysImport();
   if (a === 'tx-rematch') return txRematchNow();
+  if (a === 'audit-opening') return auditOpening();
+  if (a === 'audit-open-undo') return auditOpeningUndo();
   if (a === 'pend-confirm') { const sid = el.dataset.shop, r = data.shops.find(x => x.id === el.dataset.id && x.shop === sid); if (!r || !can(shopPerm(sid))) return; const sel = el.closest('tr') && el.closest('tr').querySelector('[data-pendsel]'), pn = sel && sel.value; if (!pn || !getProduct(pn)) return; act(() => { const { pend: _p, ...rest } = r; FEStore.save('shop', { ...rest, product: pn, expiryDate: shopExpiryFor(pn, r.date), note: '入庫單多收（門市確認品項）', ...stampEdit() }); toast(`已確認品項：${pn}`); }); return; }
   if (a.startsWith('shop-aud-')) { const sid = el.dataset.shop, k = a.slice(9);
     if (k === 'new') return shopAudNew(sid); if (k === 'open') { shopAudSel[sid] = el.dataset.id; return scheduleRender(); } if (k === 'add') return shopAudAddLine(sid); if (k === 'apply') return shopAudApply(sid); if (k === 'reset') return shopAudReset(sid); if (k === 'unapply') return shopAudUnapply(sid);
