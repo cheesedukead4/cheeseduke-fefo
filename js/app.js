@@ -1541,7 +1541,8 @@ const AUD_XL_HEAD = ['品號', '品名', '單位', '製作日期', '實盤數量
 async function auditXlsxDownload(blank) {
   const sess = blank ? null : auditSession();
   let XLSX; try { XLSX = await loadXLSX(); } catch (e) { toast(e.message, true); return; }
-  const prods = data.products.filter(p => !p.virtual).sort((a, b) => productOrder(a.name, b.name));
+  // 只列同步的品號開頭、不含烙印組合品（CK-01|YB-08 這種，總公司的庫存是原味蛋糕）；帳上有的組合品還是會列
+  const pf = portalPrefixes(), prods = data.products.filter(p => { const c = productCodeOf(p.name); return !p.virtual && !c.includes('|') && pf.includes(codePrefix(c)) && !isExcluded(p.name); }).sort((a, b) => productOrder(a.name, b.name));
   const sheet = sess ? auditSheet(sess).prods : [], byP = new Map(sheet.map(p => [p.product, p]));
   const names = [...prods.map(p => p.name), ...sheet.map(p => p.product).filter(n => !prods.some(p => p.name === n))];
   const rows = [];
@@ -1564,7 +1565,7 @@ async function auditXlsxDownload(blank) {
     ['2. 同一個產品有好幾個不同的製作日期：在那一列下面插入一列（或複製那一列），每一列填一個製作日期和數量。插入的列品號、品名空白也可以，會當成上一列的產品。'],
     ['3. 批號、有效日期空白會自動帶：現貨有效日期＝製作日＋29 天（保存 30 天、製作日算第 1 天）；批號＝製作日' + (swd ? `，${swd} 以前做的用 ${swd}（轉現貨那天）` : '') + '。標籤上的批號不一樣時才填。'],
     ['4. 類別空白＝現貨；還沒轉現貨的半成品寫「半成品」。'],
-    ['5. 沒有庫存的產品，實盤數量留空白就好（不會匯入）；帳上有、實際沒有的批號填 0。'],
+    ['5. 沒有庫存的產品，實盤數量留空白就好（不會匯入）；帳上有、實際沒有的批號填 0。烙印組合品（例如 CK-01|YB-08）沒有列出，真的有庫存就插入一列填品號。'],
     ['6. 不要改第一列的標題。填好存檔後，到 App「庫存盤點」打開那張盤點單，按「匯入實盤（Excel）」選這個檔案，先看預覽再匯入。'],
     ['7. 同一張盤點單可以重新匯入修正後的檔案（預覽時勾「先清空已經填的實盤」）。'],
     [''],
