@@ -1548,11 +1548,14 @@ async function auditXlsxDownload(blank) {
   const rows = [];
   for (const name of names) {
     const code = productCodeOf(name), nm = clean(name.slice(code.length)), u = getUnit(name), L = byP.get(name), list = L ? [...L.stock, ...L.semi] : [];
-    if (!list.length) { rows.push([code, nm, u, '', '', '', '', '', '', '']); continue; }
+    // 每個產品至少留 3 列（同一個產品可能有好幾個製作日期）；帳上已經有 3 列以上的再多留 1 列空白
+    const blankRow = () => [code, nm, u, '', '', '', '', '', '', ''];
+    if (!list.length) { rows.push(blankRow(), blankRow(), blankRow()); continue; }
     for (const x of list) {
       const old = x.batch === '期初現貨';
       rows.push([code, nm, u, old ? '' : (x.mfg || ''), x.count === null ? '' : x.count, x.pool === 'stock' ? x.batch : '', x.exp === NO_EXPIRY ? '' : x.exp, x.pool === 'stock' ? '現貨' : '半成品', x.book, x.exp !== NO_EXPIRY && x.exp < sess.date ? '已過期' : (x.added ? '實盤新增' : '')]);
     }
+    for (let k = list.length; k < Math.max(3, list.length + 1); k++) rows.push(blankRow());
   }
   const ws = XLSX.utils.aoa_to_sheet([AUD_XL_HEAD, ...rows]);
   ws['!cols'] = [10, 22, 6, 13, 10, 16, 16, 12, 10, 12].map(w => ({ wch: w }));
@@ -1562,7 +1565,7 @@ async function auditXlsxDownload(blank) {
     ['總公司盤點表：怎麼填'],
     [''],
     ['1. 每個產品一列。數到的數量填在「實盤數量」，製作日期填蛋糕實際做的那天（例如 11/12 或 2026/11/12 都可以）。'],
-    ['2. 同一個產品有好幾個不同的製作日期：在那一列下面插入一列（或複製那一列），每一列填一個製作日期和數量。插入的列品號、品名空白也可以，會當成上一列的產品。'],
+    ['2. 每個產品留 3 列，同一個產品有不同的製作日期就一列填一個製作日期和數量（用不到的列留空白）；超過 3 個再插入一列，插入的列品號、品名空白也可以，會當成上一列的產品。'],
     ['3. 批號、有效日期空白會自動帶：現貨有效日期＝製作日＋29 天（保存 30 天、製作日算第 1 天）；批號＝製作日' + (swd ? `，${swd} 以前做的用 ${swd}（轉現貨那天）` : '') + '。標籤上的批號不一樣時才填。'],
     ['4. 類別空白＝現貨；還沒轉現貨的半成品寫「半成品」。'],
     ['5. 沒有庫存的產品，實盤數量留空白就好（不會匯入）；帳上有、實際沒有的批號填 0。烙印組合品（例如 CK-01|YB-08）沒有列出，真的有庫存就插入一列填品號。'],
