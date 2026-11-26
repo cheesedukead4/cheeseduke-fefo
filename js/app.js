@@ -258,7 +258,20 @@ function calculateLedger(asOf = '9999-12-31', st = data) {
   const prior = (l, d) => l.source === 'opening' || l.entryDate < d;
   const noExpFirst = (a, b) => (a.expiryDate === NO_EXPIRY ? 0 : 1) - (b.expiryDate === NO_EXPIRY ? 0 : 1); // 期初現貨沒有效期資料，當最舊的先出
   const tie = (a, b) => cmp(a.expiryDate, b.expiryDate) || cmp(a.manufactureDate, b.manufactureDate) || cmp(a.entryDate, b.entryDate) || a.seq - b.seq || cmp(a.id, b.id);
+  // 改用全現貨模式的第一天（2026-11-26 起）：那天一開始，還沒過期的半成品不管製作日期，全部一起轉成現貨——
+  // 轉現貨那天算第一天：批號、製作日期用那天；有效日期＝那天＋產品的保存天數（30 天，跟全現貨模式的當天生產一樣；記下原本的製作／有效日期）
+  const SW = stockFromDate(); let swDone = !SW || SW > asOf;
+  const shelfOf = name => { const p = (st.products || []).find(q => q.name === name); return Number(p && p.shelfDays) || Number(st.settings && st.settings.defaultShelf) || 30; };
+  const switchAll = d => {
+    swDone = true;
+    for (const lot of [...lots]) {
+      if (lot.pool !== 'semi' || lot.remaining <= 1e-7 || lot.expiryDate < d || lot.entryDate > d) continue;
+      const q = lot.remaining; lot.remaining = 0; lot.used = clampQty(lot.used + q); lot.converted = clampQty(lot.converted + q);
+      addLot({ id: `sw-${d}#${lot.id}`, source: 'convert', pool: 'stock', product: lot.product, batch: makeBatch(lot.product, d) || '—', manufactureDate: d, expiryDate: addDays(d, shelfOf(lot.product)), fromMfg: lot.manufactureDate, fromExp: lot.expiryDate, entryDate: d, quantity: q, used: 0, shipped: 0, converted: 0, remaining: q, seq: 0, unit: lot.unit, fromLot: lot.id, switchAll: true });
+    }
+  };
   for (const e of events) {
+    if (!swDone && e.date >= SW) switchAll(SW);
     const x = e.item;
     if (e.type === 'opening' || e.type === 'production') {
       addLot({ id: x.id, source: e.type, pool: x.pool === 'stock' ? 'stock' : 'semi', product: x.product, batch: x.batch, manufactureDate: x.manufactureDate, expiryDate: e.type === 'production' ? prodExp(x, st) : x.expiryDate, entryDate: e.date, quantity: Number(x.quantity), used: 0, shipped: 0, converted: 0, remaining: Number(x.quantity), seq: x.seq || 0, unit: getUnit(x.product, st) });
@@ -341,6 +354,7 @@ function calculateLedger(asOf = '9999-12-31', st = data) {
     for (const lot of eligible) { if (remaining <= 1e-7) break; if (lot.remaining <= 1e-7) continue; const amount = clampQty(Math.min(remaining, lot.remaining)); use(lot, amount); allocations.push(allocOf(lot, amount, false)); remaining = clampQty(remaining - amount); }
     shipments.set(x.id, { required, shipped: clampQty(required - remaining), shortage: clampQty(remaining), allocations });
   }
+  if (!swDone) switchAll(SW);
   return { lots, shipments, converts, adjusts };
 }
 // 依「產品＋現貨／半成品＋批號＋製作日＋有效日」彙整；inQty＝入庫（期初＋生產＋轉入現貨），shipped＝出貨，converted＝轉成現貨
