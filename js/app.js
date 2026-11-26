@@ -1537,7 +1537,6 @@ async function auditAddLine() {
   act(() => { FEStore.save('audit', { id: `cnt-${sess.id}-${key}`, type: 'count', session: sess.id, date: sess.date, key, product: res.product, pool: res.pool, batch: res.batch, mfg: res.mfg, exp: res.exp, qty: res.qty, added: true, ...stampNew() }); toast('已加入'); });
 }
 /* ---------- 盤點 Excel：下載盤點表（印出來或在 Excel 填），盤完匯入實盤 ---------- */
-const AUD_XL_HEAD = ['品號', '品名', '單位', '製作日期', '實盤數量', '批號（空白自動）', '有效日期（空白自動）', '類別（空白＝現貨）', '帳上數量', '備註'];
 async function auditXlsxDownload(blank) {
   const sess = blank ? null : auditSession();
   let XLSX; try { XLSX = await loadXLSX(); } catch (e) { toast(e.message, true); return; }
@@ -1545,39 +1544,42 @@ async function auditXlsxDownload(blank) {
   const pf = portalPrefixes(), prods = data.products.filter(p => { const c = productCodeOf(p.name); return !p.virtual && !c.includes('|') && pf.includes(codePrefix(c)) && !isExcluded(p.name); }).sort((a, b) => productOrder(a.name, b.name));
   const sheet = sess ? auditSheet(sess).prods : [], byP = new Map(sheet.map(p => [p.product, p]));
   const names = [...prods.map(p => p.name), ...sheet.map(p => p.product).filter(n => !prods.some(p => p.name === n))];
-  const rows = [];
-  for (const name of names) {
-    const code = productCodeOf(name), nm = clean(name.slice(code.length)), u = getUnit(name), L = byP.get(name), list = L ? [...L.stock, ...L.semi] : [];
-    // 每個產品至少留 3 列（同一個產品可能有好幾個製作日期）；帳上已經有 3 列以上的再多留 1 列空白
-    const blankRow = () => [code, nm, u, '', '', '', '', '', '', ''];
-    if (!list.length) { rows.push(blankRow(), blankRow(), blankRow()); continue; }
-    for (const x of list) {
-      const old = x.batch === '期初現貨';
-      rows.push([code, nm, u, old ? '' : (x.mfg || ''), x.count === null ? '' : x.count, x.pool === 'stock' ? x.batch : '', x.exp === NO_EXPIRY ? '' : x.exp, x.pool === 'stock' ? '現貨' : '半成品', x.book, x.exp !== NO_EXPIRY && x.exp < sess.date ? '已過期' : (x.added ? '實盤新增' : '')]);
-    }
-    for (let k = list.length; k < Math.max(3, list.length + 1); k++) rows.push(blankRow());
-  }
-  const ws = XLSX.utils.aoa_to_sheet([AUD_XL_HEAD, ...rows]);
-  ws['!cols'] = [10, 22, 6, 13, 10, 16, 16, 12, 10, 12].map(w => ({ wch: w }));
-  ws['!autofilter'] = { ref: `A1:J${rows.length + 1}` };
+  // 每個產品一列，不同的製作日期在同一列往右填「製作日期1、數量1、製作日期2、數量2…」（至少 3 組；帳上的製作日期比較多就多幾組）
+  const allOf = name => { const L = byP.get(name); return L ? [...L.stock, ...L.semi] : []; };
+  const listOf = name => allOf(name).filter(x => x.batch !== '期初現貨' && isDate(x.mfg)).sort((a, b) => cmp(a.mfg, b.mfg) || cmp(a.exp, b.exp));
+  const slots = Math.max(3, ...names.map(n => listOf(n).length));
+  const head = ['品號', '品名', '單位']; for (let k = 1; k <= slots; k++) head.push(`製作日期${k}`, `數量${k}`); head.push('帳上（製作日：數量）', '備註');
+  const rows = names.map(name => {
+    const code = productCodeOf(name), all = allOf(name), list = listOf(name), r = [code, clean(name.slice(code.length)), getUnit(name)];
+    for (let k = 0; k < slots; k++) { const x = list[k]; r.push(x ? x.mfg : '', x && x.count !== null ? x.count : ''); }
+    r.push(all.filter(x => x.book > 1e-7).map(x => `${x.batch === '期初現貨' ? '期初現貨' : md(x.mfg)}${x.pool === 'semi' ? '（半成品）' : ''}：${fmt(x.book)}`).join('、'));
+    const notes = [];
+    if (sess && all.some(x => x.book > 1e-7 && x.exp !== NO_EXPIRY && x.exp < sess.date)) notes.push('有已過期');
+    if (all.some(x => x.batch === '期初現貨')) notes.push('期初現貨請在 App 填');
+    r.push(notes.join('、'));
+    return r;
+  });
+  const ws = XLSX.utils.aoa_to_sheet([head, ...rows]);
+  ws['!cols'] = [10, 16, 5, ...Array.from({ length: slots }, () => [12, 7]).flat(), 28, 16].map(w => ({ wch: w }));
+  ws['!autofilter'] = { ref: `A1:${XLSX.utils.encode_col(head.length - 1)}${rows.length + 1}` };
   const swd = stockFromDate();
   const help = [
     ['總公司盤點表：怎麼填'],
     [''],
-    ['1. 每個產品一列。數到的數量填在「實盤數量」，製作日期填蛋糕實際做的那天（例如 11/12 或 2026/11/12 都可以）。'],
-    ['2. 每個產品留 3 列，同一個產品有不同的製作日期就一列填一個製作日期和數量（用不到的列留空白）；超過 3 個再插入一列，插入的列品號、品名空白也可以，會當成上一列的產品。'],
-    ['3. 批號、有效日期空白會自動帶：現貨有效日期＝製作日＋29 天（保存 30 天、製作日算第 1 天）；批號＝製作日' + (swd ? `，${swd} 以前做的用 ${swd}（轉現貨那天）` : '') + '。標籤上的批號不一樣時才填。'],
-    ['4. 類別空白＝現貨；還沒轉現貨的半成品寫「半成品」。'],
-    ['5. 沒有庫存的產品，實盤數量留空白就好（不會匯入）；帳上有、實際沒有的批號填 0。烙印組合品（例如 CK-01|YB-08）沒有列出，真的有庫存就插入一列填品號。'],
+    ['1. 每個產品一列。不同的製作日期都填在同一列：第一個製作日期和數到的數量填「製作日期1」「數量1」，第二個填「製作日期2」「數量2」，依此類推；用不到的留空白。日期寫 11/12、1112 或 2026/11/12 都可以。'],
+    [`2. 超過 ${slots} 個製作日期：在下面插入一列，品號、品名空白也可以，會當成上一列的產品，繼續往右填。`],
+    ['3. 批號、有效日期自動帶：現貨有效日期＝製作日＋29 天（保存 30 天、製作日算第 1 天）；批號＝製作日' + (swd ? `，${swd} 以前做的用 ${swd}（轉現貨那天）` : '') + '。帳上已經有同一個製作日期的批次，就用帳上的批號、有效日期。'],
+    ['4. 「帳上」欄是 App 那時候的批次庫存（製作日：數量），只供參考；帳上有、實際沒有的製作日期，數量填 0。'],
+    ['5. 沒有庫存的產品留空白就好（不會匯入）。烙印組合品（例如 CK-01|YB-08）沒有列出，真的有庫存就插入一列填品號。'],
     ['6. 不要改第一列的標題。填好存檔後，到 App「庫存盤點」打開那張盤點單，按「匯入實盤（Excel）」選這個檔案，先看預覽再匯入。'],
     ['7. 同一張盤點單可以重新匯入修正後的檔案（預覽時勾「先清空已經填的實盤」）。'],
     [''],
-    [sess ? `盤點單：${sess.date}（${sess.phase === 'start' ? '當天開始前' : '當天結束'}）；「帳上數量」是那時候的批次庫存，只供參考。` : '這是空白盤點表（沒有帳上數量）。'],
+    [sess ? `盤點單：${sess.date}（${sess.phase === 'start' ? '當天開始前' : '當天結束'}）；帳上＝${sess.phase === 'start' ? addDays(sess.date, -1) : sess.date} 結束的批次庫存。` : '這是空白盤點表（沒有帳上數量）。'],
     [`產生時間：${new Date().toLocaleString('zh-TW')}`]
   ];
   const wh = XLSX.utils.aoa_to_sheet(help); wh['!cols'] = [{ wch: 110 }];
   const wb = XLSX.utils.book_new(); XLSX.utils.book_append_sheet(wb, ws, '盤點表'); XLSX.utils.book_append_sheet(wb, wh, '說明');
-  const buf = XLSX.write(wb, { bookType: 'xlsx', type: 'array' });
+  const buf = XLSX.write(wb, { bookType: 'xlsx', type: 'array', compression: true });
   downloadFile(sess ? `總公司盤點表_${sess.date}_${sess.phase === 'start' ? '開始前' : '結束'}.xlsx` : `總公司盤點表_空白_${TODAY()}.xlsx`, new Blob([buf], { type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' }), null, '盤點表 Excel 已下載');
 }
 // 盤點表的日期：parseCellDate 看得懂的，加上 11/12、1112（年份照盤點日，比盤點日晚 2 個月以上當去年）、民國 115/11/12
@@ -1608,43 +1610,55 @@ async function auditXlsxImport(picked) {
   const hi = rows.findIndex(r => r.some(c => /^品號/.test(c)) && r.some(c => /^(實盤|數量)/.test(c)));
   if (hi < 0) { toast('找不到標題列：第一列要有「品號」和「實盤數量」（請用 App 下載的盤點表）', true, 8000); return; }
   const H = rows[hi], col = re => H.findIndex(c => re.test(c));
-  const cCode = col(/^品號/), cName = col(/^品名/), cMfg = col(/製作日/), cQty = col(/^實盤/) >= 0 ? col(/^實盤/) : col(/^數量/), cBatch = col(/^批號/), cExp = col(/^有效日/), cPool = col(/^類別/);
+  const cCode = col(/^品號/), cName = col(/^品名/), cBatch = col(/^批號/), cExp = col(/^有效日/), cPool = col(/^類別/);
+  // 「製作日期／數量」一組一組：每個「製作日期」欄配右邊最近的「數量／實盤」欄；同一列好幾組＝每個產品一列的盤點表
+  const pairs = [];
+  H.forEach((c, i) => { if (!/製作日/.test(c)) return; for (let j = i + 1; j < H.length; j++) { if (/製作日/.test(H[j])) break; if (/^(實盤|數量)/.test(H[j])) { pairs.push([i, j]); break; } } });
+  if (!pairs.length) pairs.push([-1, col(/^實盤/) >= 0 ? col(/^實盤/) : col(/^數量/)]);
+  const wide = pairs.length > 1;
+  // 帳上同一個產品、同一個製作日期只有一批 → 用帳上的批號、有效日期（例如切換前轉的現貨）
+  const bookBy = new Map();
+  for (const x of auditSheet(sess).prods.flatMap(p => [...p.stock, ...p.semi])) { if (!isDate(x.mfg) || x.batch === '期初現貨') continue; const k = x.product + '|' + x.mfg; if (!bookBy.has(k)) bookBy.set(k, []); bookBy.get(k).push(x); }
   const ok = new Map(), errs = []; let last = null, nRows = 0;
   for (let i = hi + 1; i < rows.length; i++) {
-    const r = rows[i], g = c => (c >= 0 ? r[c] || '' : ''), code = g(cCode), name = g(cName), qs = g(cQty).replace(/[,，\s]/g, ''), row = i + 1;
+    const r = rows[i], g = c => (c >= 0 ? r[c] || '' : ''), code = g(cCode), name = g(cName), row = i + 1;
     let p = last;
     if (code || name) { p = (code && matchProductCell(code)) || (name && matchProductCell(name)) || (code && name ? matchProductCell(code + ' ' + name) : null); last = p; }
-    if (qs === '') continue;
-    if (!p) { errs.push(`第 ${row} 列：找不到產品「${code || name || '（品號空白）'}」`); continue; }
-    const q = Number(qs); if (!Number.isFinite(q) || q < 0) { errs.push(`第 ${row} 列：${productCodeOf(p.name)} 實盤數量「${qs}」不是 0 以上的數字`); continue; }
-    const pool = /半成品/.test(g(cPool)) ? 'semi' : 'stock';
-    let bt = pool === 'stock' ? cleanBatch(g(cBatch)) : '', mfg = audXlDate(g(cMfg), sess.date), exp = audXlDate(g(cExp), sess.date);
-    if (g(cMfg) && !mfg) { errs.push(`第 ${row} 列：${productCodeOf(p.name)} 製作日期「${g(cMfg)}」看不懂`); continue; }
-    if (g(cExp) && !exp) { errs.push(`第 ${row} 列：${productCodeOf(p.name)} 有效日期「${g(cExp)}」看不懂`); continue; }
-    if (bt === '期初現貨') { mfg = ''; exp = NO_EXPIRY; }
-    else {
-      if (!mfg) { errs.push(`第 ${row} 列：${productCodeOf(p.name)} 沒有填製作日期`); continue; }
-      if (mfg > sess.date) { errs.push(`第 ${row} 列：${productCodeOf(p.name)} 製作日期 ${mfg} 比盤點日 ${sess.date} 晚`); continue; }
-      if (pool === 'stock' && !bt) bt = auditAutoBatch(p.name, mfg);
-      if (!exp) exp = auditAutoExp(p.name, pool, mfg);
-    }
-    const key = auditKey(p.name, pool, bt, mfg, exp), o = ok.get(key);
-    if (o) { o.qty = clampQty(o.qty + q); o.rows.push(row); } else ok.set(key, { key, product: p.name, pool, batch: bt, mfg, exp, qty: q, rows: [row] });
-    nRows++;
+    pairs.forEach(([cm, cq], k) => {
+      const qs = g(cq).replace(/[,，\s]/g, ''), ms = g(cm); if (qs === '') return; // 數量空白＝沒盤（帳上帶出來的製作日期也一樣）
+      const at = wide ? `第 ${row} 列第 ${k + 1} 組` : `第 ${row} 列`, where = wide ? `${row} 列第 ${k + 1} 組` : `${row}`;
+      if (!p) { errs.push(`${at}：找不到產品「${code || name || '（品號空白）'}」`); return; }
+      const pc = productCodeOf(p.name), q = Number(qs); if (!Number.isFinite(q) || q < 0) { errs.push(`${at}：${pc} 數量「${qs}」不是 0 以上的數字`); return; }
+      const poolS = wide ? '' : g(cPool), es = wide ? '' : g(cExp);
+      let pool = /半成品/.test(poolS) ? 'semi' : 'stock', bt = !wide && pool === 'stock' ? cleanBatch(g(cBatch)) : '', mfg = audXlDate(ms, sess.date), exp = audXlDate(es, sess.date);
+      if (ms && !mfg) { errs.push(`${at}：${pc} 製作日期「${ms}」看不懂`); return; }
+      if (es && !exp) { errs.push(`${at}：${pc} 有效日期「${es}」看不懂`); return; }
+      if (bt === '期初現貨') { mfg = ''; exp = NO_EXPIRY; }
+      else {
+        if (!mfg) { errs.push(`${at}：${pc} 沒有填製作日期`); return; }
+        if (mfg > sess.date) { errs.push(`${at}：${pc} 製作日期 ${mfg} 比盤點日 ${sess.date} 晚`); return; }
+        const bk = !bt && !es ? (bookBy.get(p.name + '|' + mfg) || []).filter(x => !poolS || x.pool === pool) : [];
+        if (bk.length === 1) { pool = bk[0].pool; bt = pool === 'stock' ? bk[0].batch : ''; exp = bk[0].exp; }
+        else { if (pool === 'stock' && !bt) bt = auditAutoBatch(p.name, mfg); if (!exp) exp = auditAutoExp(p.name, pool, mfg); }
+      }
+      const key = auditKey(p.name, pool, bt, mfg, exp), o = ok.get(key);
+      if (o) { o.qty = clampQty(o.qty + q); o.rows.push(where); } else ok.set(key, { key, product: p.name, pool, batch: bt, mfg, exp, qty: q, rows: [where] });
+      nRows++;
+    });
   }
   if (!ok.size && !errs.length) { toast('檔案裡沒有填任何實盤數量', true); return; }
   const list = [...ok.values()].sort((a, b) => productOrder(a.product, b.product) || cmp(a.mfg, b.mfg) || cmp(a.exp, b.exp));
   const lines = new Map(auditSheet(sess).prods.flatMap(p => [...p.stock, ...p.semi]).map(x => [x.key, x]));
   const existing = data.audits.filter(r => r.type === 'count' && r.session === sess.id);
   const nP = new Set(list.map(x => x.product)).size, total = sumQ(list, x => x.qty);
-  const tbl = list.length ? `<div class="table-scroll" style="max-height:320px"><table><thead><tr><th>品號</th><th>製作日期</th><th>批號</th><th>有效日期</th><th class="num">實盤</th><th>Excel 列</th></tr></thead><tbody>${list.map(x => `<tr><td>${esc(productCodeOf(x.product))}</td><td class="mono">${esc(x.mfg || '—')}</td><td class="mono">${esc(x.pool === 'stock' ? x.batch : '半成品')}</td><td class="mono">${esc(expShow(x.exp))}</td><td class="num">${fmt(x.qty)}</td><td>${esc(x.rows.join('、'))}${lines.has(x.key) ? '' : ' ' + badge('帳上沒有', 'due')}</td></tr>`).join('')}</tbody></table></div>` : '';
-  const res = await modal({ title: '匯入實盤：預覽', ok: list.length ? '匯入' : '關閉', wide: true, html: `<p>${esc(file.name)}：<strong>${list.length} 列、${nP} 個品項、共 ${fmt(total)} 個</strong>匯入到 ${esc(sess.date)}（${sess.phase === 'start' ? '當天開始前' : '當天結束'}）的盤點單。同一個批號、有效日期的列會加在一起。</p>${errs.length ? `<div class="notice danger"><strong>${errs.length} 列有問題，不會匯入</strong>（改好 Excel 再匯一次）：<br>${errs.slice(0, 40).map(esc).join('<br>')}${errs.length > 40 ? `<br>…還有 ${errs.length - 40} 列` : ''}</div>` : ''}${tbl}${existing.length && list.length ? `<label style="display:flex;gap:8px;align-items:flex-start;margin-top:12px"><input type="checkbox" id="ax-clear" checked> 先清空這張盤點單已經填的 ${existing.length} 列實盤（重新匯入修正版時用；不勾＝只更新 Excel 裡有的列）</label>` : ''}`,
+  const tbl = list.length ? `<div class="table-scroll" style="max-height:320px"><table><thead><tr><th>品號</th><th>製作日期</th><th>批號</th><th>有效日期</th><th class="num">實盤</th><th>Excel 位置</th></tr></thead><tbody>${list.map(x => `<tr><td>${esc(productCodeOf(x.product))}</td><td class="mono">${esc(x.mfg || '—')}</td><td class="mono">${esc(x.pool === 'stock' ? x.batch : '半成品')}</td><td class="mono">${esc(expShow(x.exp))}</td><td class="num">${fmt(x.qty)}</td><td>${esc(x.rows.join('、'))}${lines.has(x.key) ? '' : ' ' + badge('帳上沒有', 'due')}</td></tr>`).join('')}</tbody></table></div>` : '';
+  const res = await modal({ title: '匯入實盤：預覽', ok: list.length ? '匯入' : '關閉', wide: true, html: `<p>${esc(file.name)}：<strong>${list.length} 筆、${nP} 個品項、共 ${fmt(total)} 個</strong>匯入到 ${esc(sess.date)}（${sess.phase === 'start' ? '當天開始前' : '當天結束'}）的盤點單。同一個批號、有效日期的會加在一起。</p>${errs.length ? `<div class="notice danger"><strong>${errs.length} 筆有問題，不會匯入</strong>（改好 Excel 再匯一次）：<br>${errs.slice(0, 40).map(esc).join('<br>')}${errs.length > 40 ? `<br>…還有 ${errs.length - 40} 列` : ''}</div>` : ''}${tbl}${existing.length && list.length ? `<label style="display:flex;gap:8px;align-items:flex-start;margin-top:12px"><input type="checkbox" id="ax-clear" checked> 先清空這張盤點單已經填的 ${existing.length} 筆實盤（重新匯入修正版時用；不勾＝只更新 Excel 裡有的）</label>` : ''}`,
     collect: b => ({ clear: !!(b.querySelector('#ax-clear') && b.querySelector('#ax-clear').checked) }) });
   if (!res || !list.length) return;
   act(() => {
     if (res.clear) { const rm = existing.filter(r => !ok.has(r.key)).map(r => r.id); if (rm.length) FEStore.removeMany('audit', rm); }
     FEStore.saveMany('audit', list.map(x => { const line = lines.get(x.key), old = existing.find(r => r.key === x.key); return { id: `cnt-${sess.id}-${x.key}`, type: 'count', session: sess.id, date: sess.date, key: x.key, product: x.product, pool: x.pool, batch: x.batch, mfg: x.mfg || (line && line.mfg) || '', exp: x.exp, qty: x.qty, added: !line || !!line.added, ...(old ? { by: old.by, at: old.at, ...stampEdit() } : stampNew()) }; }));
-    toast(`已匯入實盤 ${list.length} 列、共 ${fmt(total)} 個${errs.length ? `；${errs.length} 列有問題沒匯入` : ''}`, !!errs.length, 8000);
+    toast(`已匯入實盤 ${list.length} 筆、共 ${fmt(total)} 個${errs.length ? `；${errs.length} 筆有問題沒匯入` : ''}`, !!errs.length, 8000);
   });
 }
 // 當作期初（重新開始，2026-11-26 起）：實盤的每一列記成總公司的期初庫存（入帳日＝盤點隔天；當天開始前的盤點＝當天），
